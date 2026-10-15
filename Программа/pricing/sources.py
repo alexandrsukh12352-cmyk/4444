@@ -462,6 +462,11 @@ def scan_workspace(root: Path) -> Workspace:
     paths = data_paths(root)
     ensure_data_dirs(root)
     price_dirs = [paths["prices"]] if paths["prices"].is_dir() else []
+    # Все новые файлы рабочей папки — сразу и параллельно; дальше они берутся из кэша.
+    everything = collect_files([p for p in (paths["crosses"], paths["prices"], paths["groups"], paths["legacy"]) if p.is_dir()], True)
+    resolved = [d.resolve() for d in price_dirs]
+    later = _older_dates(everything, resolved)
+    _prefetch([f for f in everything if f not in later], resolved)
     shared_paths = [p for p in (paths["crosses"], paths["prices"]) if p.is_dir()]
     shared = scan(shared_paths, price_dirs, all_dates=False) if shared_paths else Sources({}, [])
     packs = []
@@ -655,6 +660,15 @@ def _is_currency_file(path: Path) -> bool:
     return stem == "валюта" or stem.startswith("валюта ") or stem.startswith("валюта_")
 
 
+def _prefetch(files: list[Path], price_dirs: list[Path]) -> None:
+    """Новые файлы читаются из Excel параллельно, до разбора по одному."""
+    from .filecache import prefetch
+
+    prices = {f for f in files if any(d in f.resolve().parents for d in price_dirs) and not _is_currency_file(f)}
+    wanted = [f for f in files if not _is_currency_file(f)]
+    prefetch(wanted, prices, lambda name, n, total: boot_step("Читаю новые файлы параллельно", f"{n} из {total} · {name}"))
+
+
 def _price_sheets_of(f: Path) -> list[Sheet]:
     """Листы прайса без полной сетки в памяти: только начало (PriceSheet)."""
     from .filecache import read_price_heads
@@ -692,6 +706,7 @@ def scan(paths: list[Path], price_dirs: list[Path] | None = None, all_dates: boo
     recursive = bool(price_dirs) or any(p.is_dir() and p.name in DATA_DIRS.values() for p in paths)
     files = collect_files(paths, recursive)
     later = set() if all_dates else _older_dates(files, price_dirs)
+    _prefetch([f for f in files if f not in later], price_dirs)
     dormant: list[Path] = []
     for f in files:
         if f in later:
@@ -768,6 +783,9 @@ def wake_dormant(src: Sources) -> bool:
     dormant = list(getattr(src, "dormant_prices", None) or [])
     if not dormant:
         return False
+    from .filecache import prefetch
+
+    prefetch(dormant, set(dormant), lambda name, n, total: boot_step("Читаю прайсы прошлых дат", f"{n} из {total} · {name}"))
     sheets = list(src.price_sheets)
     for f in dormant:
         boot_step("Читаю прайс прошлой даты", f.name)

@@ -64,7 +64,10 @@ def main(argv=None) -> int:
         print("Не установлен модуль openpyxl. Выполните: python -m pip install openpyxl")
         return 1
 
+    from pricing import filecache
     from pricing.server import ensure_layout, serve
+
+    filecache.PARALLEL = True  # новые файлы читаются в нескольких процессах сразу
 
     ensure_layout(ROOT)
     (ROOT / "Входящие").mkdir(exist_ok=True)

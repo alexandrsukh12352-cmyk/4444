@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import pickle
 import threading
 from pathlib import Path
@@ -34,9 +35,98 @@ def reset_stats() -> None:
     misses = 0
 
 
-def _slot(path: Path, mtime_ns: int, size: int) -> Path:
+def _slot(path: Path, mtime_ns: int, size: int, cache_dir: Path | None = None) -> Path:
     raw = f"{CACHE_VERSION}|{path.resolve()}|{mtime_ns}|{size}".encode()
-    return CACHE_DIR / f"{hashlib.sha1(raw).hexdigest()}.pkl"
+    return (cache_dir or CACHE_DIR) / f"{hashlib.sha1(raw).hexdigest()}.pkl"
+
+
+# ---------------------------------------------------------------- параллельное чтение новых файлов
+
+PARALLEL_MIN_BYTES = 8 * 1024 * 1024  # меньше — процессы дороже самого чтения
+PARALLEL_MAX = 6
+# Включает main.py. Процесс-помощник заново запускает главный файл программы, поэтому
+# параллельное чтение разрешено только там, где главный файл защищён `if __name__ == "__main__"`.
+PARALLEL = False
+
+
+def _cached_on_disk(path: Path, want_head: bool) -> bool:
+    st = path.stat()
+    if not _slot(path, st.st_mtime_ns, st.st_size).is_file():
+        return False
+    return not want_head or _head_slot(path, st.st_mtime_ns, st.st_size).is_file()
+
+
+def _prefetch_one(args: tuple) -> bool:
+    """В отдельном процессе: прочитать файл и положить сетку (и начало прайса) в кэш на диске."""
+    raw_path, cache_dir, want_head = args
+    path, cache = Path(raw_path), Path(cache_dir)
+    st = path.stat()
+    full_slot = _slot(path, st.st_mtime_ns, st.st_size, cache)
+    sheets = None
+    if full_slot.is_file():
+        try:
+            with full_slot.open("rb") as fh:
+                sheets = pickle.load(fh)
+        except (OSError, pickle.PickleError, EOFError, AttributeError, ValueError):
+            sheets = None
+    if sheets is None:
+        sheets = read_sheets(path)
+        _store(full_slot, sheets, cache)
+    if want_head:
+        raw = f"head|{CACHE_VERSION}|{HEAD_ROWS}|{path.resolve()}|{st.st_mtime_ns}|{st.st_size}".encode()
+        head_slot = cache / f"head-{hashlib.sha1(raw).hexdigest()}.pkl"
+        _store(head_slot, [(s.name, len(s.grid), s.grid[:HEAD_ROWS]) for s in sheets], cache)
+    return True
+
+
+def prefetch(paths: list[Path], price_paths: set[Path] | None = None, on_step=None) -> int:
+    """Файлы, которых нет в кэше, читаются из Excel параллельно. Возвращает, сколько прочитано.
+
+    Новые прайсы приходят каждую неделю, и первый запуск после этого — самый долгий.
+    Несколько файлов сразу читают несколько ядер процессора. Если процессы не запустились,
+    ничего страшного: файлы прочитаются по одному, как раньше.
+    """
+    global misses
+    if not PARALLEL:
+        return 0
+    price_paths = price_paths or set()
+    todo = []
+    for p in paths:
+        try:
+            if not _cached_on_disk(p, p in price_paths):
+                todo.append(p)
+        except OSError:
+            continue
+    if len(todo) < 2 or sum(p.stat().st_size for p in todo) < PARALLEL_MIN_BYTES:
+        return 0
+    cpus = os.cpu_count() or 1
+    if cpus < 2:
+        return 0
+    workers = min(len(todo), max(2, cpus - 1), PARALLEL_MAX)
+    # Крупные файлы первыми: так процессы заканчивают примерно вместе.
+    todo.sort(key=lambda p: p.stat().st_size, reverse=True)
+    done = 0
+    try:
+        import multiprocessing
+        from concurrent.futures import ProcessPoolExecutor, as_completed
+
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        # spawn — как в Windows: процесс стартует с чистого листа и сам находит модули программы.
+        with ProcessPoolExecutor(max_workers=workers, mp_context=multiprocessing.get_context("spawn")) as pool:
+            jobs = {pool.submit(_prefetch_one, (str(p), str(CACHE_DIR), p in price_paths)): p for p in todo}
+            for job in as_completed(jobs):
+                try:
+                    job.result()
+                    done += 1
+                    if on_step:
+                        on_step(jobs[job].name, done, len(todo))
+                except Exception:  # noqa: BLE001 — этот файл прочитается обычным порядком
+                    continue
+    except Exception:  # noqa: BLE001 — процессы не поднялись: читаем по одному
+        return done
+    with _lock:
+        misses += done
+    return done
 
 
 def read_sheets_cached(path: Path) -> list:
@@ -100,9 +190,9 @@ def read_full_uncached(path: Path) -> list:
     return sheets
 
 
-def _store(slot: Path, data) -> None:
+def _store(slot: Path, data, cache_dir: Path | None = None) -> None:
     try:
-        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        (cache_dir or CACHE_DIR).mkdir(parents=True, exist_ok=True)
         tmp = slot.with_suffix(".tmp")
         with tmp.open("wb") as fh:
             pickle.dump(data, fh, protocol=pickle.HIGHEST_PROTOCOL)
