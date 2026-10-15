@@ -10,6 +10,7 @@ import hashlib
 import pickle
 import re
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 
 from .bootlog import step as boot_step
@@ -30,7 +31,7 @@ PATTERNS = {
               r"^фирма", r"brand", r"^maker", r"^завод"],
     "article": [r"^катал", r"^артикул$", r"^артикул", r"номер детали", r"код производителя", r"каталожный",
                 r"part\s*(no|number|#)", r"^article", r"^номер$", r"^арт\.?$", r"^код детали"],
-    "price": [r"^опт", r"^цена$", r"^цена", r"цена", r"^price", r"стоимость", r"^руб"],
+    "price": [r"^опт", r"опт", r"^цена$", r"^цена", r"цена", r"^price", r"стоимость", r"^руб"],
     "qty": [r"^кол-?во", r"количество", r"^остаток", r"наличие", r"^qty", r"stock", r"^склад", r"в наличии"],
     "name": [r"^наименование", r"^название", r"^описание", r"^name", r"^товар"],
 }
@@ -44,12 +45,62 @@ CITY_CODES = {
 }
 
 
+_ALIASES: dict[str, str] = {}  # ключ бренда как в прайсе -> ключ бренда конкурента
+_ALIAS_TOKEN = ""
+
+
+_BRAND_RE = re.compile(r"[^0-9A-ZА-Я]")
+_SUPPLIER_RE = re.compile(r"[^0-9a-zа-я]")
+
+
+@lru_cache(maxsize=1 << 16)
+def _raw_brand_key(value) -> str:
+    return _BRAND_RE.sub("", norm_text(value))
+
+
+def raw_brand_key(value) -> str:
+    """Ключ бренда без синонимов: только буквы и цифры в верхнем регистре."""
+    try:
+        return _raw_brand_key(value)
+    except TypeError:
+        return _BRAND_RE.sub("", norm_text(value))
+
+
 def brand_key(value) -> str:
-    return re.sub(r"[^0-9A-ZА-Я]", "", norm_text(value))
+    """Ключ бренда для сравнения. «Kashiyama Japan» считается Kashiyama, если так задано в синонимах."""
+    key = raw_brand_key(value)
+    return _ALIASES.get(key, key) if _ALIASES else key
+
+
+def set_brand_aliases(rows) -> None:
+    """Синонимы брендов из настроек: [[как написано у поставщика, бренд конкурента], ...]."""
+    global _ALIASES, _ALIAS_TOKEN
+    found: dict[str, str] = {}
+    for row in rows or []:
+        if not isinstance(row, (list, tuple)) or len(row) < 2:
+            continue
+        alias, canonical = raw_brand_key(row[0]), raw_brand_key(row[1])
+        if alias and canonical and alias != canonical:
+            found[alias] = canonical
+    _ALIASES = found
+    _ALIAS_TOKEN = "|".join(f"{k}>{v}" for k, v in sorted(found.items()))
+
+
+def alias_token() -> str:
+    """Меняется вместе с синонимами — по нему пересчитываются кэши цен."""
+    return _ALIAS_TOKEN
+
+
+@lru_cache(maxsize=1 << 14)
+def _supplier_key(value) -> str:
+    return _SUPPLIER_RE.sub("", clean(value).lower().replace("ё", "е"))
 
 
 def supplier_key(value) -> str:
-    return re.sub(r"[^0-9a-zа-я]", "", clean(value).lower().replace("ё", "е"))
+    try:
+        return _supplier_key(value)
+    except TypeError:
+        return _SUPPLIER_RE.sub("", clean(value).lower().replace("ё", "е"))
 
 
 @dataclass
@@ -263,11 +314,16 @@ def detect(sheet: Sheet, rows: range | None = None) -> tuple[Header | None, dict
                 priced = [(i, rank) for rank, i in candidates if not _name_title(raw[i])]
                 if not priced:
                     continue
-                scored = [(-_numeric_share(sheet, data_start, i, 40), rank, i) for i, rank in priced]
-                share, _, idx = min(scored)
-                # Цена — это числа. Текстовый столбец, даже со словом «цена» в шапке, не берём.
-                if -share < 0.8:
+                # Цена — это числа: текстовый столбец, даже со словом «цена» в шапке, не берём.
+                # Из числовых — оптовая цена: сначала «ОПТ», розница («розн», РРЦ) в последнюю очередь.
+                scored = []
+                for i, rank in priced:
+                    share = _numeric_share(sheet, data_start, i, 40)
+                    if share >= 0.8:
+                        scored.append((bool(_RETAIL.search(keys[i])), rank, -share, i))
+                if not scored:
                     continue
+                idx = min(scored)[3]
             elif fld == "qty":
                 scored = [(rank, -_filled_share(sheet, data_start, i), i) for rank, i in candidates]
                 idx = min(scored)[2]
@@ -290,6 +346,7 @@ def detect(sheet: Sheet, rows: range | None = None) -> tuple[Header | None, dict
 
 
 _NAME_TITLE = re.compile(r"наименован|название|описание|^name$|^товар")
+_RETAIL = re.compile(r"розн|ррц|мрц|rrp|retail|рекоменд")
 
 
 def _name_title(title: str) -> bool:

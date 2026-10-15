@@ -81,13 +81,17 @@ class Settings:
         data["options"] = dict(DEFAULT_OPTIONS)
         if user_file:
             user = _read(user_file)
-            for item in ("gz", "discounts", "price_profiles", "price_files", "cars", "positioning"):
+            for item in ("gz", "discounts", "price_profiles", "price_files", "cars", "positioning", "brand_aliases"):
                 if item in user:
                     data[item] = user[item]
             if "currency_rates" in user:
                 data["currency_rates"] = {**{k: "" for k in data.get("currency_rates") or {}}, **user["currency_rates"]}
             data["options"].update(user.get("options") or {})
         loaded = cls(data)
+        if user_file:
+            from .prices import set_brand_aliases
+
+            set_brand_aliases(data.get("brand_aliases"))
         if key is not None:
             _LOADS[key] = loaded
             if len(_LOADS) > 8:
@@ -143,6 +147,11 @@ class Settings:
     @property
     def price_files(self) -> dict:
         return self.data.setdefault("price_files", {})
+
+    @property
+    def brand_aliases(self) -> list:
+        """[[как бренд написан у поставщика или в кроссах, бренд конкурента], ...]."""
+        return self.data.setdefault("brand_aliases", [])
 
     @property
     def cars(self) -> list[list]:

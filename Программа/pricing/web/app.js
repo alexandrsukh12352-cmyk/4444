@@ -1134,13 +1134,14 @@ function brandKey(v) {
 }
 
 function priceBad(f) {
-  return !!(f.problem || f.doubt || f.status === "none" || !f.offers || f.mismatch);
+  return !!(f.problem || f.doubt || f.status === "none" || !f.offers || f.mismatch || (f.quality && f.quality.length));
 }
 
 function renderPriceAudit() {
   const kpis = $("#px-kpis");
   const list = $("#px-list");
   if (!kpis || !list) return;
+  renderBrandHints();
   const filterEl = $("#px-filter");
   const filter = S.pxFilter || "all";
   if (filterEl) filterEl.querySelectorAll("button").forEach((b) => b.classList.toggle("on", b.dataset.v === filter));
@@ -1290,6 +1291,7 @@ function pxRow(f) {
   if (f.problem) notes.push(f.problem);
   else if (f.why) notes.push(f.why);
   if (f.doubt) notes.push(f.doubt);
+  (f.quality || []).forEach((q) => notes.push(q));
   if (!f.enabled) notes.push("выключен");
   const where = f.shape || (f.header_row ? `шапка, строка ${f.header_row}${cols ? ` · ${cols}` : ""}` : (f.problem ? "" : "шапка не найдена"));
   const editing = S.editing && S.editWhere === "prices" && S.editing.id === f.id;
@@ -1861,6 +1863,139 @@ function renderDash() {
     <ul class="conclusions">${(d.conclusions || []).map((t) => `<li>${esc(t)}</li>`).join("")}</ul>`;
 }
 
+// ------------------------------------------------------------------ покрытие ценами конкурентов
+
+const isoDate = (v) => String(v || "").split("-").reverse().join(".");
+
+function renderCoverage() {
+  const el = $("#coverage");
+  if (!el) return;
+  const a = S.analysis;
+  const f = (a && a.funnel) || [];
+  if (!a || !f.length) { el.innerHTML = ""; return; }
+  const sc = a.screen || { enabled: true, ratio: 3 };
+  const screened = Object.entries(a.screened || {}).map(([k, n]) => `${esc(k)} — ${fmtInt(n)}`).join("; ");
+  const rows = f.map((c) => {
+    const r = c.reliability || {};
+    const lead = (r.leaders || []).map((x) => `${esc(x.supplier)} ${fmtInt(x.rows)}`).join(", ");
+    return `<tr>
+      <td><b>${esc(c.name)}</b></td>
+      <td class="num">${fmtInt(c.items)}</td>
+      <td class="num">${fmtInt(c.yes)}</td>
+      <td class="num">${fmtInt(c.in_prices)}</td>
+      <td class="num">${fmtInt(c.monitored)}</td>
+      <td class="num">${c.excluded ? fmtInt(c.excluded) : "—"}</td>
+      <td class="num"><b>${fmtInt(c.final)}</b>${c.by_no ? `<div class="muted">из них по «Нет» ${fmtInt(c.by_no)}</div>` : ""}</td>
+      <td class="num">${c.sold_share == null ? "—" : fmtPct(c.sold_share)}</td>
+      <td class="num">${r.priced ? fmtInt(r.single) : "—"}</td>
+      <td class="num">${r.second_gap == null ? "—" : fmtPct(r.second_gap, true)}</td>
+      <td class="muted">${lead || "—"}</td>
+    </tr>`;
+  }).join("");
+  const actions = f.flatMap((c) => (c.actions || []).map((t) => `<li><b>${esc(c.name)}.</b> ${esc(t)}</li>`)).join("");
+  const h = (a.history || []).slice().reverse();
+  const history = h.length ? `
+    <div class="dash-title">Как менялось по сборкам отчёта</div>
+    <div class="table-wrap"><table class="mini"><thead><tr>
+      <th>Дата</th><th class="num">Товаров</th><th class="num">С ценой</th><th class="num">Доля продаж с ценой</th>
+      <th class="num">В позиционировании</th><th class="num">Медиана откл.</th><th class="num">Откл. с весом</th><th class="num">ВР</th>
+    </tr></thead><tbody>${h.map((x) => `<tr>
+      <td>${esc(isoDate(x.date))}</td><td class="num">${fmtInt(x.items)}</td><td class="num">${fmtInt(x.priced)}</td>
+      <td class="num">${x.sold_share == null ? "—" : fmtPct(x.sold_share)}</td>
+      <td class="num">${x.with_target ? `${fmtInt(x.in_band)} из ${fmtInt(x.with_target)}` : "—"}</td>
+      <td class="num">${fmtPct(x.median, true)}</td><td class="num">${fmtPct(x.weighted, true)}</td><td class="num">${fmtPct(x.vr)}</td>
+    </tr>`).join("")}</tbody></table></div>` : "";
+  el.innerHTML = `
+    <div class="dash-title">Покрытие ценами конкурентов</div>
+    <div class="row tight" style="flex-wrap:wrap; gap:12px; margin-bottom:8px">
+      <label><input type="checkbox" id="screen-on" ${sc.enabled ? "checked" : ""}> Отсеивать несопоставимое: комплекты и цены, отличающиеся от нашей в</label>
+      <input class="input num-input" id="screen-ratio" type="number" min="1.5" step="0.5" value="${esc(sc.ratio)}" style="width:64px"><span class="muted">раза и больше</span>
+      <button class="btn small" id="gaps-export" type="button">Выгрузить дыры в кроссах</button>
+    </div>
+    ${screened ? `<div class="muted" style="font-size:12.5px; margin-bottom:8px">Отсеяно пар: ${screened}. Список — в выгрузке дыр, лист «Несопоставимо».</div>` : ""}
+    <div class="table-wrap"><table class="mini"><thead><tr>
+      <th>Конкурент</th><th class="num">Товаров</th><th class="num">Кросс «Да»</th><th class="num">Есть в прайсах</th>
+      <th class="num">У поставщиков листа 02</th><th class="num">Отсеяно</th><th class="num">С ценой</th><th class="num">Доля продаж с ценой</th>
+      <th class="num">Один поставщик</th><th class="num">Второй дороже на</th><th>Кто чаще даёт минимум</th>
+    </tr></thead><tbody>${rows}</tbody></table></div>
+    ${actions ? `<ul class="conclusions">${actions}</ul>` : ""}
+    ${history}`;
+  const on = $("#screen-on");
+  const ratio = $("#screen-ratio");
+  if (on) on.onchange = saveScreen;
+  if (ratio) ratio.onchange = saveScreen;
+  const gaps = $("#gaps-export");
+  if (gaps) gaps.onclick = exportGaps;
+}
+
+async function saveScreen() {
+  const enabled = !!($("#screen-on") && $("#screen-on").checked);
+  const ratio = Math.max(1.5, Number(($("#screen-ratio") || {}).value) || 3);
+  try {
+    await api("/api/options", { options: { screen: { enabled, kits: true, ratio } } });
+  } catch (e) {
+    toast(e.message, "bad");
+    return;
+  }
+  analyze();
+}
+
+async function exportGaps() {
+  const b = $("#gaps-export");
+  if (b) b.disabled = true;
+  try {
+    const r = await api("/api/crosses-gaps", { folder: S.folder, options: S.opts });
+    toast(`Готово: ${r.name} — без «Да» ${fmtInt(r.no_yes)}, «Да» без цены ${fmtInt(r.yes_no_price)}, отсеяно ${fmtInt(r.excluded)}`, "good");
+  } catch (e) {
+    toast(e.message, "bad");
+  } finally {
+    if (b) b.disabled = false;
+  }
+}
+
+// ------------------------------------------------------------------ написание брендов
+
+function renderBrandHints() {
+  const el = $("#px-hints");
+  if (!el) return;
+  const hints = (S.scan && S.scan.brand_hints) || [];
+  const aliases = (S.scan && S.scan.brand_aliases) || [];
+  if (!hints.length && !aliases.length) {
+    el.classList.add("hidden");
+    el.innerHTML = "";
+    return;
+  }
+  el.classList.remove("hidden");
+  el.innerHTML = `
+    <div class="card-head"><h2>Написание брендов</h2>
+      <span class="sub">Бренд в прайсе или в кроссах похож на конкурента, но не совпал. «Считать как» — и его цены пойдут в сравнение</span></div>
+    ${hints.length ? `<div class="table-wrap"><table class="mini"><thead><tr>
+      <th>Как написано</th><th class="num">Строк</th><th>Где</th><th>Похож на</th><th></th></tr></thead><tbody>
+      ${hints.map((h, i) => `<tr><td><b>${esc(h.brand)}</b></td><td class="num">${fmtInt(h.rows)}</td>
+        <td class="muted">${esc((h.where || []).join(", "))}</td><td>${esc(h.suggest)}</td>
+        <td><button type="button" class="btn small" data-alias="${i}">Считать как ${esc(h.suggest)}</button></td></tr>`).join("")}
+    </tbody></table></div>` : `<div class="muted">Похожих несовпавших брендов нет.</div>`}
+    ${aliases.length ? `<div class="px-brands" style="margin-top:10px">Уже заданы:
+      ${aliases.map((x) => `<span class="tag hit">${esc(x[0])} → ${esc(x[1])}
+        <button type="button" class="btn small ghost" data-unalias="${esc(x[0])}">убрать</button></span>`).join(" ")}</div>` : ""}`;
+  el.querySelectorAll("[data-alias]").forEach((b) => (b.onclick = () => {
+    const h = hints[Number(b.dataset.alias)];
+    if (h) saveAlias({ add: [h.brand, h.suggest] });
+  }));
+  el.querySelectorAll("[data-unalias]").forEach((b) => (b.onclick = () => saveAlias({ remove: b.dataset.unalias })));
+}
+
+async function saveAlias(body) {
+  try {
+    await api("/api/brand-aliases", body);
+  } catch (e) {
+    toast(e.message, "bad");
+    return;
+  }
+  toast("Сохранено — перечитываю прайсы", "good");
+  if (await rescan(false)) analyze();
+}
+
 function fmtSignedInt(v) {
   const n = Math.round(Number(v) || 0);
   if (!n) return "0";
@@ -1917,7 +2052,7 @@ async function runAnalyze() {
   const seq = ++S.analyzeSeq;
   const state = $("#analyze-state");
   if (state) state.textContent = "Считаю отчёт… фильтры можно менять дальше";
-  document.querySelectorAll("#dash, #preview").forEach((el) => el.classList.add("loading-veil"));
+  document.querySelectorAll("#dash, #coverage, #preview").forEach((el) => el.classList.add("loading-veil"));
   try {
     const a = await api("/api/analyze", { folder: S.folder, options: S.opts });
     if (seq !== S.analyzeSeq) return;
@@ -1931,7 +2066,7 @@ async function runAnalyze() {
       const state = $("#analyze-state");
       if (state) state.textContent = `Прайсы от ${a.price_date}`;
     }
-    renderCounter(); renderAbc(); renderPriceControls(); renderCrosses(); renderSources(); renderDash(); renderPreview(); renderPosLines(); renderRatesNote(); renderContext();
+    renderCounter(); renderAbc(); renderPriceControls(); renderCrosses(); renderSources(); renderDash(); renderCoverage(); renderPreview(); renderPosLines(); renderRatesNote(); renderContext();
     if (S.settings && !S.settingsDirty) renderRates();
     updateSummary();
   } catch (e) {

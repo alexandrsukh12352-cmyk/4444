@@ -261,7 +261,12 @@ def test_price_article_matches_cross_without_signs(src, settings):
         Offer("G-BRAKE", "GR-20751", 20.0, 1, 2, "GR20751"),
     ])
     opt = R.Options(**GROUP, price_source="prices", monitoring_only=False)
-    prep = R.prepare(src, settings, opt, [signed])
+    # 10 ₽ против диска за тысячи — отсев «в разы» убрал бы цену; здесь проверяем только сопоставление артикула.
+    settings.options["screen"] = {"enabled": False}
+    try:
+        prep = R.prepare(src, settings, opt, [signed])
+    finally:
+        settings.options.pop("screen", None)
     row = next(x for x in prep.kept if x.code == "130909")
     assert row.prices["BREMBO"] == 10.0
 
@@ -366,11 +371,19 @@ def test_minimal_price_and_source_filter(src, settings):
     sheet = Sheet(Path("Cheap.xlsx"), "Лист1", [])
     cheap = PriceFile(sheet, "Cheap", "", None, {}, "", "auto", offers=[Offer("BREMBO", "09.A417.11", 10.0, 5, 1)])
     # 10 ₽ рядом с настоящей ценой АЦПКД — заглушка и в минимум не идёт. Одна такая цена, без сравнения, остаётся.
-    for source, expected in [("acp", acp_price), ("prices", 10.0), ("both", acp_price)]:
-        opt = R.Options(**GROUP, price_source=source, monitoring_only=False)
-        prep = R.prepare(src, settings, opt, [cheap])
-        row = next(x for x in prep.kept if x.code == "130909")
-        assert row.prices["BREMBO"] == expected, source
+    settings.options["screen"] = {"enabled": False}  # здесь проверяем минимум и источники, не отсев «в разы»
+    try:
+        for source, expected in [("acp", acp_price), ("prices", 10.0), ("both", acp_price)]:
+            opt = R.Options(**GROUP, price_source=source, monitoring_only=False)
+            prep = R.prepare(src, settings, opt, [cheap])
+            row = next(x for x in prep.kept if x.code == "130909")
+            assert row.prices["BREMBO"] == expected, source
+    finally:
+        settings.options.pop("screen", None)
+    # С отсевом одинокая цена 10 ₽ против диска за тысячи в сравнение не идёт.
+    prep = R.prepare(src, settings, R.Options(**GROUP, price_source="prices", monitoring_only=False), [cheap])
+    row = next(x for x in prep.kept if x.code == "130909")
+    assert row.prices["BREMBO"] is None and "дороже" in row.excluded["BREMBO"]["reason"]
     assert R.prepare(src, settings, R.Options(**GROUP, price_source="both", monitoring_only=False), [cheap]).index.skipped_low >= 1
     monitored = R.prepare(src, settings, R.Options(**GROUP, price_source="prices", monitoring_only=True), [cheap])
     assert monitored.index.skipped_by_monitoring == 1

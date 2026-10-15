@@ -18,7 +18,7 @@ from pathlib import Path
 
 from .excel import clean, num, read_sheets
 from .filecache import CACHE_DIR
-from .prices import PriceFile, brand_key, price_date, supplier_key
+from .prices import PriceFile, alias_token, brand_key, price_date, supplier_key
 from .report import MIN_PRICE
 from .sources import Sources, _is_currency_file, norm_article, norm_text
 
@@ -172,7 +172,9 @@ def read_currency(folder: Path) -> dict:
 
 def _offer_token(pf: PriceFile) -> str:
     cols = ",".join(f"{k}:{pf.cols[k]}" for k in sorted(pf.cols))
-    return _file_token(pf.sheet.file) + f"|{pf.header.row if pf.header else ''}|{cols}|{pf.supplier}|{pf.shot_date}"
+    token = _file_token(pf.sheet.file) + f"|{pf.header.row if pf.header else ''}|{cols}|{pf.supplier}|{pf.shot_date}"
+    aliases = alias_token()
+    return f"{token}|{aliases}" if aliases else token
 
 
 def offer_index(pf: PriceFile) -> dict[tuple[str, str], float]:

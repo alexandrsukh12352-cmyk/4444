@@ -148,6 +148,7 @@ class Row:
     sister_brand: str = ""
     sister_article: str = ""
     sister_price: float | None = None
+    excluded: dict = field(default_factory=dict)  # конкурент -> почему его цена не взята в сравнение
 
     @property
     def any_price(self) -> bool:
@@ -1195,6 +1196,7 @@ class Prepared:
     analysis: list[dict]
     index: PriceIndex
     positioning: object
+    screened: dict = field(default_factory=dict)  # причина отсева -> сколько пар
 
 
 def rows_for_workbook(prep: Prepared, src: Sources, opt: Options) -> list[Row]:
@@ -1214,11 +1216,14 @@ def prepare(src: Sources, settings: Settings, opt: Options, price_files: list[Pr
     index = index_for(src, opt, price_files, monitoring_map(positioning), competitor_brand_keys(positioning))
     analysis = analyze_crosses(src, kept, opt, index)
     attach_crosses(src, kept, opt, index, suggestions_map(analysis))
+    from .insight import screen_pairs
+
+    screened = screen_pairs(kept, settings)
     kept, dropped_price = apply_filters(kept, opt, with_prices=True)
     apply_recommendations(kept, opt)
     kept.sort(key=lambda r: (-(r.sales_qty or 0), -(r.sales or 0), r.article))
     apply_sisters(kept, src)
-    return Prepared(rows, kept, dropped + dropped_price, analysis, index, positioning)
+    return Prepared(rows, kept, dropped + dropped_price, analysis, index, positioning, dict(screened))
 
 
 def _subgroup_in_positioning(positioning, brand: str, group: str, subgroup: str) -> bool:
@@ -1227,11 +1232,18 @@ def _subgroup_in_positioning(positioning, brand: str, group: str, subgroup: str)
     Нет строки позиционирования по группе — не отсекаем: сравнивать не с чем.
     """
     b, g = norm_text(brand), norm_text(group)
-    allowed = {
-        norm_text(row.subgroup)
-        for row in positioning.rows
-        if norm_text(row.brand) == b and norm_text(row.group) == g and row.subgroup
-    }
+    # Список подгрупп по ТМ и группе один на позиционирование — не перебираем строки на каждый товар.
+    book = getattr(positioning, "_allowed_subgroups", None)
+    if book is None:
+        book = {}
+        for row in positioning.rows:
+            if row.subgroup:
+                book.setdefault((norm_text(row.brand), norm_text(row.group)), set()).add(norm_text(row.subgroup))
+        try:
+            positioning._allowed_subgroups = book
+        except AttributeError:
+            pass
+    allowed = book.get((b, g))
     if not allowed:
         return True
     return norm_text(subgroup) in allowed

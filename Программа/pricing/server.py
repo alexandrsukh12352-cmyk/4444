@@ -17,7 +17,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import bootlog, check, crossdump, dynamics, filecache, prices, report
+from . import bootlog, check, crossdump, dynamics, filecache, insight, price_check, prices, report
 from .cars import SEGMENTS, UNKNOWN, load_default as cars_default
 from .dashboard import summary as dashboard_summary
 from .excel import clean, num
@@ -142,7 +142,8 @@ class State:
         Раньше каждая группа разбирала все прайсы заново и держала в памяти свою копию —
         на «Все группы» с большими прайсами программе не хватало памяти.
         """
-        key = json.dumps([settings.price_profiles, settings.price_files], sort_keys=True, ensure_ascii=False)
+        key = json.dumps([settings.price_profiles, settings.price_files, prices.alias_token()],
+                         sort_keys=True, ensure_ascii=False)
         with self.lock:
             cached = getattr(src, "_price_cache", None)
             if cached and cached[0] == key:
@@ -228,9 +229,17 @@ def _all_dates_sources(body: dict, settings: Settings) -> tuple[Sources, bool]:
 
 def describe_price(pf: prices.PriceFile, positioning) -> dict:
     competitors = {prices.brand_key(b): b for b in positioning.monitoring}
-    found = Counter(competitors[k] for k in (prices.brand_key(o.brand) for o in pf.offers) if k in competitors)
+    keys: dict = {}  # бренд как в прайсе -> ключ; брендов в прайсе мало, строк много
+
+    def key_of(brand):
+        k = keys.get(brand)
+        if k is None:
+            k = keys[brand] = prices.brand_key(brand)
+        return k
+
+    found = Counter(competitors[k] for k in (key_of(o.brand) for o in pf.offers) if k in competitors)
     d = prices.describe(pf)
-    ours = [o for o in pf.offers if prices.brand_key(o.brand) in competitors]
+    ours = [o for o in pf.offers if key_of(o.brand) in competitors]
     if ours:
         d["preview"] = [{"brand": o.brand, "article": o.article, "price": o.price, "qty": o.qty} for o in ours[:6]]
     book = report.supplier_brand_book(positioning)
@@ -251,8 +260,50 @@ def price_payload(src: Sources, settings: Settings) -> list[dict]:
         return cached[1]
     positioning = report.load_positioning(src, settings)
     payload = [describe_price(pf, positioning) for pf in files]
+    try:
+        notes = price_check.quality_notes(files, dynamics.competitor_brand_names(positioning))
+    except Exception:  # noqa: BLE001 — проверка не должна ронять список прайсов
+        notes = {}
+    for item in payload:
+        if notes.get(item["id"]):
+            item["quality"] = notes[item["id"]]
     src._price_payload = (files, payload)
     return payload
+
+
+def brand_hints_payload(src: Sources, settings: Settings) -> list[dict]:
+    """Похожие на конкурентов бренды, которые не совпали. Считается раз на набор прайсов."""
+    files = STATE.price_files(src, settings)
+    cached = getattr(src, "_brand_hints", None)
+    if cached and cached[0] is files:
+        return cached[1]
+    positioning = report.load_positioning(src, settings)
+    try:
+        hints = price_check.brand_hints(files, dynamics.competitor_brand_names(positioning), src.crosses)
+    except Exception:  # noqa: BLE001
+        hints = []
+    src._brand_hints = (files, hints)
+    return hints
+
+
+def api_brand_aliases(body: dict) -> dict:
+    """Синонимы брендов: «как написано у поставщика» -> бренд конкурента. Добавить или убрать."""
+    settings = Settings.load()
+    rows = [list(r) for r in settings.brand_aliases if isinstance(r, (list, tuple)) and len(r) >= 2]
+    add = body.get("add")
+    if isinstance(add, (list, tuple)) and len(add) >= 2 and clean(add[0]) and clean(add[1]):
+        alias, canonical = clean(add[0]), clean(add[1])
+        if prices.raw_brand_key(alias) == prices.raw_brand_key(canonical):
+            raise UserFacing("Это и так один бренд.")
+        rows = [r for r in rows if prices.raw_brand_key(r[0]) != prices.raw_brand_key(alias)]
+        rows.append([alias, canonical])
+    remove = body.get("remove")
+    if remove:
+        rows = [r for r in rows if prices.raw_brand_key(r[0]) != prices.raw_brand_key(remove)]
+    settings.data["brand_aliases"] = rows
+    settings.save()
+    Settings.load()  # синонимы вступают в силу сразу
+    return {"brand_aliases": rows}
 
 
 def resolve_folder(raw: str | None, settings: Settings) -> Path:
@@ -530,6 +581,14 @@ def _remember_rec(settings: Settings, incoming: dict) -> None:
     for key in ("ui", "brand", "group", "report_kind"):
         if key in incoming:
             settings.options[key] = incoming[key]
+    if isinstance(incoming.get("screen"), dict):
+        raw = incoming["screen"]
+        screen = {"enabled": bool(raw.get("enabled", True)), "kits": bool(raw.get("kits", True))}
+        try:
+            screen["ratio"] = max(1.5, float(raw.get("ratio", 3)))
+        except (TypeError, ValueError):
+            screen["ratio"] = 3.0
+        settings.options["screen"] = screen
     if isinstance(incoming.get("sheet_filters"), list):
         settings.options["sheet_filters"] = [k for k in incoming["sheet_filters"] if k in report.SHEET_FILTERS]
     scope = incoming.get("rec_scope")
@@ -657,7 +716,7 @@ def complete_groups(ws: Workspace, settings: Settings) -> list[dict]:
 def _gap_token(settings: Settings) -> str:
     import hashlib
     payload = json.dumps(
-        {"files": settings.price_files, "profiles": settings.price_profiles},
+        {"files": settings.price_files, "profiles": settings.price_profiles, "aliases": prices.alias_token()},
         sort_keys=True, ensure_ascii=False, default=str,
     )
     return hashlib.sha1(payload.encode()).hexdigest()
@@ -942,6 +1001,8 @@ def _api_scan_body(body: dict) -> dict:
             getattr(src, "pst", []) or [], settings),
         "reread": filecache.misses,
         "monitoring_suppliers": report.monitoring_suppliers(report.load_positioning(src, settings)),
+        "brand_hints": brand_hints_payload(src, settings),
+        "brand_aliases": settings.brand_aliases,
     }
 
 
@@ -1007,6 +1068,8 @@ def api_analyze(body: dict) -> dict:
         for r in final[:15]
     ]
     by_source = getattr(prep.index, "by_source", {})
+    any_index = _any_index(src, opt, files, prep.positioning)
+    funnel = insight.funnel(src, final, prep.analysis, prep.index, any_index, files, prep.positioning)
     seen = set()
     positioning_rows = []
     for r in final:
@@ -1042,7 +1105,53 @@ def api_analyze(body: dict) -> dict:
         "price_date": files[0].shot_date if files and files[0].shot_date else "",
         "sales_period": src.sales_period,
         "dashboard": dashboard_summary(final, opt),
+        "funnel": funnel,
+        "screened": insight.excluded_counts(final),
+        "screen": insight.screen_options(settings),
+        "history": insight.history_for(opt.brand, opt.group),
     }
+
+
+def _any_index(src: Sources, opt: report.Options, files, positioning):
+    """Цены всех прайсов и АЦПКД — без отбора по листу мониторинга и наличию. Для воронки и дыр."""
+    loose = report.Options(price_source=opt.price_source, monitoring_only=False, in_stock_only=False)
+    return report.index_for(src, loose, files, report.monitoring_map(positioning), report.competitor_brand_keys(positioning))
+
+
+def _remember_history(opt: report.Options, result) -> None:
+    prep = getattr(result, "prep", None)
+    if prep is None:
+        return
+    try:
+        insight.record_history(opt.brand, opt.group, prep.kept, dashboard_summary(prep.kept, opt), opt.stock_slice or "")
+    except Exception:  # noqa: BLE001 — история не должна мешать сборке отчёта
+        pass
+
+
+def api_crosses_gaps(body: dict) -> dict:
+    """Книга для базы кроссов по открытой группе: нет «Да», «Да» без цены, отсеянное."""
+    settings = Settings.load()
+    folder = resolve_folder(body.get("folder"), settings)
+    opt = _options(body)
+    src = STATE.for_group(folder, opt.brand, opt.group) if _workspace_root(folder) else STATE.sources(folder)
+    files = _report_prices(src, settings)
+    prep = report.prepare(src, settings, opt, files)
+    if not prep.kept:
+        raise UserFacing("После фильтров не осталось товаров — выгружать нечего.")
+    any_index = _any_index(src, opt, files, prep.positioning)
+    out = _report_dir(settings, folder)
+    title = " ".join(x for x in (opt.brand, opt.group) if x) or "группа"
+    path = out / f"{insight.GAPS_NAME} — {title}.xlsx"
+    try:
+        info = insight.gaps_workbook(path, src, prep.kept, prep.analysis, prep.index, any_index, prep.positioning, files)
+    except PermissionError:
+        raise UserFacing("Не удалось сохранить файл — возможно, он открыт в Excel. Закройте его и повторите.") from None
+    from .workbook import _excel2016_stylesheet
+
+    _excel2016_stylesheet(path)
+    if body.get("open", True):
+        _try_open(path)
+    return {**info, "path": str(path), "name": path.name, "folder": str(path.parent)}
 
 
 def _slice_payloads(raw: dict) -> list[dict]:
@@ -1080,6 +1189,7 @@ def _api_build_stock(body: dict, raws: list[dict]) -> dict:
         except ValueError as e:
             skipped.append({"brand": opt.brand, "group": opt.group, "slice": label, "reason": str(e)})
             continue
+        _remember_history(opt, result)
         made.append({
             "path": str(result.path), "name": result.path.name, "folder": str(result.path.parent),
             "brand": opt.brand, "group": opt.group, "slice": label, "rows": result.rows,
@@ -1106,6 +1216,7 @@ def api_build(body: dict) -> dict:
         raise UserFacing("Не удалось сохранить файл — возможно, он открыт в Excel. Закройте его и повторите.") from None
     except ValueError as e:
         raise UserFacing(str(e)) from None
+    _remember_history(opt, result)
     incoming = body.get("options") or {}
     settings.options.pop("price_agg", None)
     settings.options.update(
@@ -1192,6 +1303,7 @@ def api_build_all(body: dict) -> dict:
                     _ensure_brief(out_dir, src, settings, opt)
                 skipped.append({"folder": slice_label, "brand": g["brand"], "group": g["group"], "reason": str(e)})
                 continue
+            _remember_history(opt, result)
             note = "" if result.priced else "цен конкурентов нет, файл всё равно создан"
             made.append({
                 "path": str(result.path), "name": result.path.name, "folder_name": slice_label,
@@ -1626,6 +1738,8 @@ ROUTES = {
     "/api/prices/save": api_prices_save,
     "/api/prices/layout": api_prices_layout,
     "/api/prices/crosses": api_prices_crosses,
+    "/api/crosses-gaps": api_crosses_gaps,
+    "/api/brand-aliases": api_brand_aliases,
     "/api/prices/dynamics": api_prices_dynamics,
     "/api/prices/dynamics-export": api_prices_dynamics_export,
     "/api/prices/forget": api_prices_forget,

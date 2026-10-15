@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 from collections import defaultdict
+from functools import lru_cache
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -127,8 +128,20 @@ def norm_article(value) -> str:
     return ARTICLE_RE.sub("", text)
 
 
-def norm_text(value) -> str:
+@lru_cache(maxsize=1 << 17)
+def _norm_text(value) -> str:
     return clean(value).replace("ё", "е").replace("Ё", "Е").upper()
+
+
+def norm_text(value) -> str:
+    """Текст для сравнения: без лишних пробелов, «ё» как «е», в верхнем регистре.
+
+    Бренды, группы и подгруппы повторяются в каждой строке выгрузок — результат запоминается.
+    """
+    try:
+        return _norm_text(value)
+    except TypeError:  # нехешируемое значение — считаем без памяти
+        return clean(value).replace("ё", "е").replace("Ё", "Е").upper()
 
 
 # ---------------------------------------------------------------- модели

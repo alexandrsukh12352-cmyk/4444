@@ -158,6 +158,62 @@ _DIMENSION = re.compile(r'<dimension ref="([^"]*)"\s*/>')
 _MARK = "\x00{}\x00"
 
 
+_ILLEGAL = re.compile(r"[\000-\010]|[\013-\014]|[\016-\037]")
+_ERROR_CODES = {"#NULL!", "#DIV/0!", "#VALUE!", "#REF!", "#NAME?", "#NUM!", "#N/A"}
+
+
+def _raw_template_fast(grid: list[list]) -> RawTemplate | None:
+    """Тот же XML, что пишет openpyxl, но без объектов ячеек. None — в листе есть то, что так не пишем
+    (даты, формулы, коды ошибок, недопустимые символы), тогда лист собирает сам openpyxl."""
+    from xml.etree.ElementTree import _escape_cdata as esc
+
+    mark = _MARK.format(0)
+    parts = ["<sheetData>"]
+    probes: list[tuple[int, int]] = []
+    min_r = min_c = None
+    max_r = max_c = 0
+    letters: dict[int, str] = {}
+    for r, row in enumerate(grid, 1):
+        cells = []
+        for c, v in enumerate(row, 1):
+            if v is None or v == "":
+                continue
+            t = type(v)
+            col = letters.get(c)
+            if col is None:
+                col = letters[c] = get_column_letter(c)
+            if t is str:
+                if len(v) > 32767 or (len(v) > 1 and v[0] == "=") or v in _ERROR_CODES or _ILLEGAL.search(v):
+                    return None
+                stripped = v.strip()
+                space = ' xml:space="preserve"' if stripped and v != stripped else ""
+                cells.append(f'<c r="{col}{r}" t="inlineStr"><is><t{space}>{esc(v)}</t></is></c>')
+            elif t is bool:
+                cells.append(f'<c r="{col}{r}" t="b"><v>{"1" if v else "0"}</v></c>')
+            elif t is int:
+                cells.append(f'<c r="{col}{r}" t="n"><v>{"%.16g" % v}</v></c>')
+            elif t is float:
+                if v != v or v in (float("inf"), float("-inf")):
+                    return None
+                if not probes:
+                    probes.append((r, c))
+                cells.append(f'<c r="{col}{r}" s="{mark}" t="n"><v>{"%.16g" % v}</v></c>')
+            else:
+                return None
+            if min_r is None:
+                min_r = r
+            min_c = c if min_c is None else min(min_c, c)
+            max_r = r
+            max_c = max(max_c, c)
+        if cells:
+            parts.append(f'<row r="{r}">{"".join(cells)}</row>')
+    if min_r is None:
+        return RawTemplate("<sheetData></sheetData>", "A1:A1", [])
+    parts.append("</sheetData>")
+    dimension = f"{get_column_letter(min_c)}{min_r}:{get_column_letter(max_c)}{max_r}"
+    return RawTemplate("".join(parts), dimension, probes)
+
+
 def raw_template(grid: list[list]) -> RawTemplate | None:
     """XML листа-выгрузки, как его пишет openpyxl. Один раз на выгрузку за сеанс программы.
 
@@ -168,6 +224,17 @@ def raw_template(grid: list[list]) -> RawTemplate | None:
     hit = _RAW_TEMPLATES.get(id(grid))
     if hit is not None and hit[0] is grid:
         return hit[1]
+    tpl = _raw_template_fast(grid)
+    if tpl is not None:
+        _RAW_TEMPLATES[id(grid)] = (grid, tpl)
+        while len(_RAW_TEMPLATES) > 6:
+            _RAW_TEMPLATES.pop(next(iter(_RAW_TEMPLATES)))
+        return tpl
+    return _raw_template_openpyxl(grid)
+
+
+def _raw_template_openpyxl(grid: list[list]) -> RawTemplate | None:
+    """Лист через сам openpyxl — для выгрузок с датами, формулами и прочим непростым."""
     try:
         from io import BytesIO
 
@@ -1223,6 +1290,7 @@ class BuildResult:
     priced: int
     kind: str
     brief: Path
+    prep: object = None  # разбор группы — для истории показателей
 
 
 def build_report(src: Sources, settings: Settings, opt: Options, out_dir: Path,
@@ -1289,7 +1357,7 @@ def build_report(src: Sources, settings: Settings, opt: Options, out_dir: Path,
     brief = write_group_brief(brief_dir, kept, opt, src)
     _excel2016_stylesheet(path, raw_sheets)
     return BuildResult(path, len(kept), [ws.title for ws in wb.worksheets], len(prep.dropped),
-                       priced, opt.report_kind, brief)
+                       priced, opt.report_kind, brief, prep)
 
 
 def write_cross_prices(ws, rows: list[Row]) -> None:
