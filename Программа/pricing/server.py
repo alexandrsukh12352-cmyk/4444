@@ -17,7 +17,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import bootlog, check, crossdump, dynamics, filecache, insight, price_check, prices, report
+from . import bootlog, check, crossdump, dynamics, filecache, insight, price_analytics, price_check, prices, report
 from .cars import SEGMENTS, UNKNOWN, load_default as cars_default
 from .dashboard import summary as dashboard_summary
 from .excel import clean, num
@@ -152,7 +152,8 @@ class State:
         known = report.known_suppliers(positioning)
         brands = dynamics.competitor_brand_names(positioning)
         sheets = tuple(src.price_sheets)
-        shared_key = (key, tuple(known), tuple(brands))
+        cross_brands, cross_pairs = cross_keys(src)
+        shared_key = (key, tuple(known), tuple(brands), len(cross_pairs))
         files = None
         with self.lock:
             for held_sheets, held_key, held_files in self.price_shared:
@@ -173,6 +174,7 @@ class State:
                 learn = [s for _, s in sorted(enumerate(both), key=lambda it: (order.get(str(it[1].file), big), it[0]))]
             files = prices.load_price_files(
                 src.price_sheets, settings.price_profiles, settings.price_files, known, brands, learn_sheets=learn,
+                known_brands=cross_brands, cross_pairs=cross_pairs,
             )
             with self.lock:
                 self.price_shared = [(sheets, shared_key, files), *self.price_shared][:3]
@@ -182,6 +184,30 @@ class State:
 
 
 STATE = State()
+
+
+_CROSS_KEYS: list = []  # [(словарь кроссов, (бренды, пары))] — держим ссылку, чтобы id не переиспользовался
+
+
+def cross_keys(src: Sources) -> tuple[set, set]:
+    """Ключи брендов из кроссов и пары (бренд кросса, артикул кросса) — чтобы проверять столбцы прайсов."""
+    crosses = getattr(src, "crosses", None) or {}
+    for held, value in _CROSS_KEYS:
+        if held is crosses:
+            return value
+    brands: set = set()
+    pairs: set = set()
+    for (own_brand, _), by_brand in crosses.items():
+        brands.add(prices.brand_key(own_brand))
+        for rows in by_brand.values():
+            for c in rows:
+                bk = prices.brand_key(c.cross_brand)
+                brands.add(bk)
+                pairs.add((bk, c.cross_key))
+    brands.discard("")
+    value = (brands, pairs)
+    _CROSS_KEYS[:] = [(crosses, value), *_CROSS_KEYS][:2]
+    return value
 
 
 def _needs_old_dates(owner: Sources, settings: Settings) -> bool:
@@ -275,11 +301,15 @@ def brand_hints_payload(src: Sources, settings: Settings) -> list[dict]:
     """Похожие на конкурентов бренды, которые не совпали. Считается раз на набор прайсов."""
     files = STATE.price_files(src, settings)
     cached = getattr(src, "_brand_hints", None)
-    if cached and cached[0] is files:
+    ignore_token = tuple(settings.options.get("brand_ignore") or [])
+    if cached and cached[0] is files and getattr(src, "_brand_hints_ignore", None) == ignore_token:
         return cached[1]
+    src._brand_hints_ignore = ignore_token
     positioning = report.load_positioning(src, settings)
+    ignore = {prices.raw_brand_key(b) for b in settings.options.get("brand_ignore") or []}
     try:
-        hints = price_check.brand_hints(files, dynamics.competitor_brand_names(positioning), src.crosses)
+        hints = price_check.brand_hints(files, dynamics.competitor_brand_names(positioning), src.crosses,
+                                        ignore=ignore)
     except Exception:  # noqa: BLE001
         hints = []
     src._brand_hints = (files, hints)
@@ -287,23 +317,48 @@ def brand_hints_payload(src: Sources, settings: Settings) -> list[dict]:
 
 
 def api_brand_aliases(body: dict) -> dict:
-    """Синонимы брендов: «как написано у поставщика» -> бренд конкурента. Добавить или убрать."""
+    """Синонимы брендов: «как написано у поставщика» -> бренд конкурента.
+
+    add / add_many — считать как конкурента; remove — убрать синоним;
+    ignore / ignore_many — «не тот бренд», больше не предлагать; unignore — вернуть в подсказки.
+    """
     settings = Settings.load()
     rows = [list(r) for r in settings.brand_aliases if isinstance(r, (list, tuple)) and len(r) >= 2]
-    add = body.get("add")
-    if isinstance(add, (list, tuple)) and len(add) >= 2 and clean(add[0]) and clean(add[1]):
+    pairs = list(body.get("add_many") or [])
+    if body.get("add"):
+        pairs.append(body["add"])
+    added = 0
+    for add in pairs:
+        if not (isinstance(add, (list, tuple)) and len(add) >= 2 and clean(add[0]) and clean(add[1])):
+            continue
         alias, canonical = clean(add[0]), clean(add[1])
         if prices.raw_brand_key(alias) == prices.raw_brand_key(canonical):
-            raise UserFacing("Это и так один бренд.")
+            if len(pairs) == 1:
+                raise UserFacing("Это и так один бренд.")
+            continue
         rows = [r for r in rows if prices.raw_brand_key(r[0]) != prices.raw_brand_key(alias)]
         rows.append([alias, canonical])
+        added += 1
     remove = body.get("remove")
     if remove:
         rows = [r for r in rows if prices.raw_brand_key(r[0]) != prices.raw_brand_key(remove)]
+    ignored = [clean(b) for b in settings.options.get("brand_ignore") or [] if clean(b)]
+    drop = list(body.get("ignore_many") or [])
+    if body.get("ignore"):
+        drop.append(body["ignore"])
+    for brand in drop:
+        brand = clean(brand)
+        if brand and prices.raw_brand_key(brand) not in {prices.raw_brand_key(b) for b in ignored}:
+            ignored.append(brand)
+    back = body.get("unignore")
+    if back:
+        ignored = [b for b in ignored if prices.raw_brand_key(b) != prices.raw_brand_key(back)]
     settings.data["brand_aliases"] = rows
+    settings.options["brand_ignore"] = ignored
     settings.save()
     Settings.load()  # синонимы вступают в силу сразу
-    return {"brand_aliases": rows}
+    # Синонимы меняют ключ разобранных прайсов, «не тот бренд» — только список подсказок.
+    return {"brand_aliases": rows, "brand_ignore": ignored, "added": added, "reread": bool(pairs or remove)}
 
 
 def resolve_folder(raw: str | None, settings: Settings) -> Path:
@@ -939,7 +994,7 @@ def api_progress(_body: dict) -> dict:
 
 
 def api_scan(body: dict) -> dict:
-    bootlog.begin()
+    bootlog.begin("scan")
     try:
         result = _api_scan_body(body)
     except Exception as exc:
@@ -1003,7 +1058,19 @@ def _api_scan_body(body: dict) -> dict:
         "monitoring_suppliers": report.monitoring_suppliers(report.load_positioning(src, settings)),
         "brand_hints": brand_hints_payload(src, settings),
         "brand_aliases": settings.brand_aliases,
+        "brand_ignore": settings.options.get("brand_ignore") or [],
+        "price_waiting": _waiting_prices(src),
     }
+
+
+def _waiting_prices(src: Sources) -> list[dict]:
+    """Прайсы прошлых дат, которые ещё не разобраны: для календаря в «Данных»."""
+    owner = getattr(src, "_dormant_owner", None) or src
+    out = []
+    for path in getattr(owner, "dormant_prices", None) or []:
+        out.append({"date": prices.price_date(path), "supplier": prices.supplier_folder(path) or path.stem,
+                    "file": path.name})
+    return out
 
 
 def _options(body: dict) -> report.Options:
@@ -1372,11 +1439,13 @@ def api_prices_save(body: dict) -> dict:
             own["cols"] = {k: int(v) for k, v in (body.get("cols") or {}).items() if v not in (None, "")}
         own.pop("columns", None)
     brands = dynamics.competitor_brand_names(positioning)
-    pf = prices.load_one(sheet, own, settings.price_profiles, report.known_suppliers(positioning), brands)
+    cross_brands, cross_pairs = cross_keys(src)
+    pf = prices.load_one(sheet, own, settings.price_profiles, report.known_suppliers(positioning), brands,
+                         known_brands=cross_brands, cross_pairs=cross_pairs)
     if body.get("dry_run"):
         return {"file": describe_price(pf, positioning)}
 
-    bootlog.begin()
+    bootlog.begin("prices")
     try:
         bootlog.step("Сохраняю столбцы", sheet.file.name)
         if "header_row" not in own:
@@ -1454,6 +1523,105 @@ def api_prices_dynamics(body: dict) -> dict:
         # Прошлые даты прочитались только сейчас — список на вкладке «Прайсы» дополняется ими.
         result["price_files"] = price_payload(src, settings)
     return result
+
+
+_CATALOGS: list = []  # [((кроссы, ПСТ, позиционирование), каталог)]
+
+
+def _all_pst(folder: Path, src: Sources) -> list:
+    """ПСТ всех групп: категория, группа и подгруппа нашего артикула для аналитики по прайсам."""
+    if not _workspace_root(folder):
+        return list(getattr(src, "pst", None) or [])
+    ws = STATE.workspace(folder)
+    seen = set()
+    out = []
+    for items in [ws.company.pst or []] + [p.sources.pst or [] for p in ws.packs]:
+        for item in items:
+            key = (norm_text(item.brand), item.article)
+            if key not in seen:
+                seen.add(key)
+                out.append(item)
+    return out
+
+
+def _price_scope(body: dict, settings: Settings):
+    """Всё для аналитики и выгрузки цен: прайсы всех дат, бренды позиционирования, пары кроссов, каталог."""
+    folder = resolve_folder(body.get("folder"), settings)
+    bootlog.step("Читаю прайсы прошлых дат", "смотрю, что уже прочитано")
+    src, woke = _all_dates_sources(body, settings)
+    bootlog.step("Обновляю список прайсов", "уже разобранные файлы берутся из кэша")
+    files = STATE.price_files(src, settings)
+    positioning = report.load_positioning(src, settings)
+    names = {prices.brand_key(n): n for n in dynamics.competitor_brand_names(positioning)}
+    for key, label in dynamics._brand_names(files).items():
+        if key in names and label:
+            names[key] = label
+    names.pop("", None)
+    _brands, pairs = cross_keys(src)
+    pst = _all_pst(folder, src)
+    catalog = None
+    held_key = (src.crosses, len(pst), id(positioning))
+    for key, value in _CATALOGS:
+        if key[0] is held_key[0] and key[1:] == held_key[1:]:
+            catalog = value
+    if catalog is None:
+        from types import SimpleNamespace
+
+        catalog = dynamics._catalog(SimpleNamespace(pst=pst, crosses=src.crosses), positioning)
+        _CATALOGS[:] = [(held_key, catalog), *_CATALOGS][:2]
+    panel = price_analytics.build_panel(files, set(names), pairs, names)
+    return folder, src, woke, files, positioning, pairs, pst, catalog, panel
+
+
+def _with_boot(plan: str, fn, body: dict) -> dict:
+    bootlog.begin(plan)
+    try:
+        result = fn(body)
+    except Exception as exc:
+        bootlog.fail(str(exc))
+        raise
+    bootlog.finish()
+    return result
+
+
+def api_prices_analytics(body: dict) -> dict:
+    return _with_boot("analytics", _prices_analytics, body)
+
+
+def api_prices_export(body: dict) -> dict:
+    return _with_boot("export", _prices_export, body)
+
+
+def _prices_analytics(body: dict) -> dict:
+    """Прайсы: что и где поменялось между двумя датами, индекс брендов по всем датам, курс."""
+    settings = Settings.load()
+    folder, src, woke, files, _pos, pairs, _pst, catalog, panel = _price_scope(body, settings)
+    bootlog.step("Считаю изменения", f"{len(panel['cells'])} позиций · {len(panel['dates'])} дат")
+    currency = dynamics.read_currency(folder)
+    result = price_analytics.analyze(panel, catalog, currency, body.get("date_from"), body.get("date_to"))
+    result["crossed"] = len(pairs)
+    result["has_crosses"] = bool(src.crosses)
+    result["currency_path"] = currency.get("path") or ""
+    if woke:
+        result["price_files"] = price_payload(src, settings)
+    return result
+
+
+def _prices_export(body: dict) -> dict:
+    """Выгрузка цен для макроса: позиции из кроссов, все даты, файл и строка источника."""
+    settings = Settings.load()
+    folder, src, _woke, files, positioning, pairs, pst, _catalog, panel = _price_scope(body, settings)
+    if not src.crosses:
+        raise UserFacing("Нет файла кроссов. Положите «Кроссы свод» в Данные/Кроссы — выгрузка берёт только позиции из кроссов.")
+    if not files:
+        raise UserFacing("Прайсов нет.")
+    currency = dynamics.read_currency(folder)
+    out = _report_dir(settings, folder)
+    out.mkdir(parents=True, exist_ok=True)
+    path = out / price_analytics.EXPORT_NAME
+    bootlog.step("Пишу Excel", path.name)
+    info = price_analytics.write_export(path, files, panel, src.crosses, pst, positioning, currency, pairs)
+    return {**info, "path": str(path.resolve()), "folder": str(out.resolve())}
 
 
 def api_prices_dynamics_export(body: dict) -> dict:
@@ -1740,6 +1908,8 @@ ROUTES = {
     "/api/prices/crosses": api_prices_crosses,
     "/api/crosses-gaps": api_crosses_gaps,
     "/api/brand-aliases": api_brand_aliases,
+    "/api/prices/analytics": api_prices_analytics,
+    "/api/prices/export": api_prices_export,
     "/api/prices/dynamics": api_prices_dynamics,
     "/api/prices/dynamics-export": api_prices_dynamics_export,
     "/api/prices/forget": api_prices_forget,

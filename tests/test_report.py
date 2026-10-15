@@ -292,13 +292,6 @@ def test_source_per_field(src, settings):
     assert (r.stock, r.sbs) == (63, 2207)
 
 
-def test_acp_as_base_takes_pst_columns(src, settings):
-    _, rows, _, _ = rows_for(src, settings, base="acp")
-    assert len(rows) == len(src.acp)
-    r = next(x for x in rows if x.code == "130909")
-    assert (r.order_group, r.purchase_currency, r.cat_a) == ("Продукция ADVICS", "JPY", 4130.83)
-
-
 def test_new_is_assortment_n_not_the_abc_category(src, settings):
     _, rows, kept, dropped = rows_for(src, settings, filters={"new": "exclude"})
     hidden = [r for r, reason in dropped if reason == "NEW"]
@@ -468,9 +461,14 @@ def test_server_endpoints(tmp_path, monkeypatch):
         assert len(split["crosses"][0]["segments"]) > 1
         init = post("/api/init", {})
         assert set(init["price_sources"]) == {"acp", "prices", "both"} and "subgroup_abc" in init["cross_splits"]
-        assert init["report_kinds"]["quick"] == "Быстрый" and init["segments"]
+        assert list(init["report_kinds"]) == ["full"] and init["segments"]
         assert analysis["dashboard"]["items"] == 547 and analysis["dashboard"]["vr"]
         assert analysis["preview"][0]["segment"]
     finally:
         httpd.shutdown()
         httpd.server_close()
+
+
+def test_old_quick_and_acp_options_read_as_full_report_from_pst():
+    opt = R.Options.from_dict({"report_kind": "quick", "base": "acp"})
+    assert (opt.report_kind, opt.base) == ("full", "pst")

@@ -560,7 +560,6 @@ def both(*cells: str) -> str:
 def report_columns(rows: list[Row], refs: Refs, opt: Options, period: str,
                    src: Sources | None = None, live: Live | None = None, settings: Settings | None = None) -> list[Column]:
     del period, refs
-    quick = opt.report_kind == "quick"
     ro = opt.recs
     live = live or Live()
     comps = competitor_order(rows)
@@ -592,12 +591,6 @@ def report_columns(rows: list[Row], refs: Refs, opt: Options, period: str,
         Column("Наименование русс.", "id", 34, lambda r, n, L: linked("pst", "name", n, L, r.name) if r.pst and r.pst.name else r.name, key="name"),
         Column("Артикул", "id", 14, lambda r, n, L: linked("pst", "article", n, L, r.article) if r.pst and r.pst.article else r.article, key="article"),
     ]
-    if quick:
-        identity = [
-            Column("Код товара", "id", 11, lambda r, *_: code_value(r.code), key="code"),
-            Column("Артикул", "id", 14, lambda r, n, L: linked("pst", "article", n, L, r.article) if r.pst and r.pst.article else r.article, key="article"),
-            Column("Наименование", "id", 30, lambda r, n, L: linked("pst", "name", n, L, r.name) if r.pst and r.pst.name else r.name, key="name"),
-        ]
     variety = Column("Разновидность", "info", 42, lambda r, n, L: linked("pst", "variety", n, L, r.variety) if r.pst and r.pst.variety else r.variety, key="variety")
     def pst_text(r, field: str):
         item = r.pst
@@ -672,55 +665,42 @@ def report_columns(rows: list[Row], refs: Refs, opt: Options, period: str,
             return linked("pst", "subgroup", n, L, r.subgroup)
         return r.subgroup
 
-    if quick:
-        cols = identity + [
-            variety,
-            Column("Подгруппа", "info", 22, subgroup_value, key="subgroup"),
-            Column("Автопарк", "car", 16, lambda r, *_: r.car.fleet if r.car else ""),
-            Column("Ценовой сегмент", "car", 12, lambda r, *_: r.car.segment if r.car else "", key="segment"),
-            Column(sales_title, "calc", 11, sales_qty_value, INT, key="sales_qty", input=is_input, rule="bar"),
-            Column("Остаток", "calc", 9, stock_value, INT, key="stock", input=is_input),
-            Column("ABC", "calc", 7, abc_value, key="abc"),
-            Column("СБС", "calc", 12, sbs_value, MONEY, key="sbs", input=is_input),
-        ]
-    else:
-        folded = [
-            Column("Группа заказа", "info", 20, lambda r, n, L: linked("pst", "order_group", n, L, r.order_group) if pst_text(r, "order_group") else r.order_group),
-            Column("Категория NEW", "info", 22, lambda r, n, L: linked("pst", "category", n, L, r.category) if pst_text(r, "category") else r.category),
-            Column("Группа NEW", "info", 16, lambda r, n, L: linked("pst", "group", n, L, r.group) if pst_text(r, "group") else r.group),
-            Column("Подгруппа NEW", "info", 24, subgroup_value, key="subgroup"),
-            Column("Закупка, валюта", "buy", 9, lambda r, n, L: linked("pst", "purchase_currency", n, L, r.purchase_currency) if pst_text(r, "purchase_currency") else r.purchase_currency, key="cur"),
-            Column("Закупка, цена в валюте", "buy", 12, lambda r, n, L: linked("pst", "purchase_price", n, L, r.purchase_price) if r.pst and r.pst.purchase_price is not None else r.purchase_price, MONEY, key="buy_cur", input=is_input),
-            Column("Закупочная цена", "calc", 13, buy_rub, MONEY, key="buy"),
-            Column("МО", "calc", 12, mo_value, MONEY, key="mo", input=is_input),
-            Column("Марки авто", "info", 28, lambda r, *_: r.car.label if r.car else ""),
-            Column("Автопарк", "car", 16, lambda r, *_: r.car.fleet if r.car else ""),
-            Column("Ценовой сегмент", "car", 12, lambda r, *_: r.car.segment if r.car else "", key="segment"),
-        ]
-        if any(r.assortment for r in rows):
-            folded.append(Column("Тип ассорт.", "info", 8, lambda r, n, L: linked("pst", "assortment", n, L, r.assortment)
-                                 if took_own(opt.source("assortment"), r.pst.assortment if r.pst else "", r.acp.assortment if r.acp else "")
-                                 else r.assortment))
-        if any(r.overstock for r in rows):
-            folded.append(Column("Оверсток", "info", 14, lambda r, n, L: linked("pst", "overstock", n, L, r.overstock) if pst_text(r, "overstock") else r.overstock))
-        if any(r.discontinued for r in rows) and opt.filter("sale") != "exclude":
-            def discontinued_value(r, n, L):
-                formula = pull("pst", "discontinued", n, L) if r.pst else None
-                if not formula:
-                    return "да" if r.discontinued else ""
-                return f'=IF({formula}=1,"да","")'
-            folded.append(Column("Вывод из ассорт.", "info", 9, discontinued_value))
-        folded.append(Column("Продажи, руб.", "calc", 15, sales_rub_value, MONEY, key="sales", input=is_input))
-        # Разновидность до свёрнутых столбцов и внутри закрепления. Иначе «+» стоит на ней,
-        # и Excel 2016 при развороте группы внутри закреплённой области зависает.
-        cols = identity + [variety] + fold(folded) + [
-            Column(sales_title, "calc", 11, sales_qty_value, INT, key="sales_qty", input=is_input, rule="bar"),
-            Column("Остаток", "calc", 9, stock_value, INT, key="stock", input=is_input),
-            Column("ABC", "calc", 7, abc_value, key="abc"),
-            Column("СБС", "calc", 12, sbs_value, MONEY, key="sbs", input=is_input),
-        ]
-    if not quick:
-        cols.append(Column("СБС план", "calc", 12, sbs_plan, MONEY, key="sbs_plan"))
+    folded = [
+        Column("Группа заказа", "info", 20, lambda r, n, L: linked("pst", "order_group", n, L, r.order_group) if pst_text(r, "order_group") else r.order_group),
+        Column("Категория NEW", "info", 22, lambda r, n, L: linked("pst", "category", n, L, r.category) if pst_text(r, "category") else r.category),
+        Column("Группа NEW", "info", 16, lambda r, n, L: linked("pst", "group", n, L, r.group) if pst_text(r, "group") else r.group),
+        Column("Подгруппа NEW", "info", 24, subgroup_value, key="subgroup"),
+        Column("Закупка, валюта", "buy", 9, lambda r, n, L: linked("pst", "purchase_currency", n, L, r.purchase_currency) if pst_text(r, "purchase_currency") else r.purchase_currency, key="cur"),
+        Column("Закупка, цена в валюте", "buy", 12, lambda r, n, L: linked("pst", "purchase_price", n, L, r.purchase_price) if r.pst and r.pst.purchase_price is not None else r.purchase_price, MONEY, key="buy_cur", input=is_input),
+        Column("Закупочная цена", "calc", 13, buy_rub, MONEY, key="buy"),
+        Column("МО", "calc", 12, mo_value, MONEY, key="mo", input=is_input),
+        Column("Марки авто", "info", 28, lambda r, *_: r.car.label if r.car else ""),
+        Column("Автопарк", "car", 16, lambda r, *_: r.car.fleet if r.car else ""),
+        Column("Ценовой сегмент", "car", 12, lambda r, *_: r.car.segment if r.car else "", key="segment"),
+    ]
+    if any(r.assortment for r in rows):
+        folded.append(Column("Тип ассорт.", "info", 8, lambda r, n, L: linked("pst", "assortment", n, L, r.assortment)
+                             if took_own(opt.source("assortment"), r.pst.assortment if r.pst else "", r.acp.assortment if r.acp else "")
+                             else r.assortment))
+    if any(r.overstock for r in rows):
+        folded.append(Column("Оверсток", "info", 14, lambda r, n, L: linked("pst", "overstock", n, L, r.overstock) if pst_text(r, "overstock") else r.overstock))
+    if any(r.discontinued for r in rows) and opt.filter("sale") != "exclude":
+        def discontinued_value(r, n, L):
+            formula = pull("pst", "discontinued", n, L) if r.pst else None
+            if not formula:
+                return "да" if r.discontinued else ""
+            return f'=IF({formula}=1,"да","")'
+        folded.append(Column("Вывод из ассорт.", "info", 9, discontinued_value))
+    folded.append(Column("Продажи, руб.", "calc", 15, sales_rub_value, MONEY, key="sales", input=is_input))
+    # Разновидность до свёрнутых столбцов и внутри закрепления. Иначе «+» стоит на ней,
+    # и Excel 2016 при развороте группы внутри закреплённой области зависает.
+    cols = identity + [variety] + fold(folded) + [
+        Column(sales_title, "calc", 11, sales_qty_value, INT, key="sales_qty", input=is_input, rule="bar"),
+        Column("Остаток", "calc", 9, stock_value, INT, key="stock", input=is_input),
+        Column("ABC", "calc", 7, abc_value, key="abc"),
+        Column("СБС", "calc", 12, sbs_value, MONEY, key="sbs", input=is_input),
+    ]
+    cols.append(Column("СБС план", "calc", 12, sbs_plan, MONEY, key="sbs_plan"))
 
     def cat_a(r, n, L):
         if r.cat_a_calc and r.discount is not None and r.mo is not None and "mo" in L:
@@ -759,7 +739,7 @@ def report_columns(rows: list[Row], refs: Refs, opt: Options, period: str,
         return value
 
     cols += [
-        Column("Кат. А", "calc", 12, cat_a, MONEY, key="cat_a", input=lambda r: not (r.cat_a_calc and not quick)),
+        Column("Кат. А", "calc", 12, cat_a, MONEY, key="cat_a", input=lambda r: not r.cat_a_calc),
         Column("ВР 1", "calc", 8, margin("cat_a"), PCT, key="vr", rule="vr"),
         Column("Сумма потенциала" if opt.money_base == "potential" else "Сумма продажи", "calc", 15, sales_sum("cat_a"), MONEY, key="sum_sale"),
         Column("Прибыль на потенциале" if opt.money_base == "potential" else "Сумма прибыли", "calc", 15, lambda r, n, L: f'=IF({both(L["sum_sale"] + str(n), L["vr"] + str(n))},'
@@ -788,16 +768,15 @@ def report_columns(rows: list[Row], refs: Refs, opt: Options, period: str,
                    f'{L["rec"]}{n}/{L["cat_a"]}{n}-1,"")', PCT_SIGNED, key="change", rule="change"),
         ]
         extra = []
-        if not quick:
-            extra.append(Column("Рек. МО", "rec", 12, lambda r, n, L: f'=IF(ISNUMBER({L["rec"]}{n}),{L["rec"]}{n}/(1-{excel_num(r.discount)}/100),"")'
-                                if r.discount is not None else None, MONEY, key="rec_mo"))
+        extra.append(Column("Рек. МО", "rec", 12, lambda r, n, L: f'=IF(ISNUMBER({L["rec"]}{n}),{L["rec"]}{n}/(1-{excel_num(r.discount)}/100),"")'
+                            if r.discount is not None else None, MONEY, key="rec_mo"))
         extra.append(Column("ВР рек.", "rec", 8, margin("rec"), PCT, key="vr_rec", rule="vr"))
         extra += [
             Column("Сумма потенциала рек." if opt.money_base == "potential" else "Сумма продажи рек.", "rec", 15, sales_sum("rec"), MONEY, key="sum_sale_rec"),
             Column("Прибыль на потенциале рек." if opt.money_base == "potential" else "Сумма прибыли рек.", "rec", 15, lambda r, n, L: f'=IF({both(L["sum_sale_rec"] + str(n), L["vr_rec"] + str(n))},'
                    f'{L["sum_sale_rec"]}{n}*{L["vr_rec"]}{n},"")', MONEY, key="sum_profit_rec"),
         ]
-        cols += fold(extra) if not quick else extra
+        cols += fold(extra)
     if any(r.in_transit is not None for r in rows):
         stock_at = next((i for i, c in enumerate(cols) if c.key == "stock"), None)
         if stock_at is not None:
@@ -1300,7 +1279,6 @@ def build_report(src: Sources, settings: Settings, opt: Options, out_dir: Path,
     if not kept:
         raise ValueError("После фильтров не осталось ни одного товара — ослабьте фильтры.")
     sheet_rows = rows_for_workbook(prep, src, opt)
-    full = opt.report_kind == "full"
 
     wb = style.new_workbook()
     used: set[str] = set()
@@ -1479,12 +1457,12 @@ def write_params_sheet(ws, src: Sources, settings: Settings, opt: Options, kept:
         ["Сформирован", dt.datetime.now().strftime("%d.%m.%Y %H:%M")],
         ["Вид отчёта", REPORT_KINDS[opt.report_kind]],
         ["ТМ / группа", f"{opt.brand} / {opt.group}"],
-        ["Основа отчёта", "АЦПКД (дополнена из ПСТ)" if opt.base == "acp" else "ПСТ (+ СБС, Продажи, скидки, ГЗ)"],
+        ["Основа отчёта", "ПСТ (+ СБС, Продажи, скидки, ГЗ)"],
         ["Товаров в отчёте", kept],
         ["Исключено фильтрами", dropped],
         ["Подгруппы", SUBGROUP_MODES[opt.subgroup_mode]],
         ["Цены конкурентов", f"минимальная: {PRICE_SOURCES[opt.price_source]}"],
-        ["Поставщики", "только из позиционирования (лист 02)" if opt.monitoring_only else "все"],
+        ["Поставщики", "только из позиционирования" if opt.monitoring_only else "все"],
         ["Наличие", "только позиции в наличии" if opt.in_stock_only else "все позиции"],
         ["Кроссы", CROSS_SPLITS[opt.cross_split]],
         ["Цель по позиционированию", TARGETS[ro.target]],

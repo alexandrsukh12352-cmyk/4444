@@ -28,12 +28,14 @@ FIELDS = {
 REQUIRED = ("article", "price")
 PATTERNS = {
     "brand": [r"бренд", r"производител", r"изготовител", r"^тм$", r"^tm$", r"торговая марка", r"^марка",
-              r"^фирма", r"brand", r"^maker", r"^завод"],
-    "article": [r"^катал", r"^артикул$", r"^артикул", r"номер детали", r"код производителя", r"каталожный",
-                r"part\s*(no|number|#)", r"^article", r"^номер$", r"^арт\.?$", r"^код детали"],
+              r"^фирма", r"brand", r"^maker", r"^завод", r"^произв\.?$", r"^manufacturer", r"^vendor$"],
+    "article": [r"^катал", r"^артикул$", r"^артикул", r"номер детали", r"номер запчаст", r"код производителя",
+                r"каталожный", r"^№\s*произв", r"^номер\s+произв", r"part\s*(no|number|#)", r"^article", r"^articul",
+                r"^номер$", r"^арт\.?$", r"^код детали", r"^partnumber", r"^oem\s*(no|number)?$"],
     "price": [r"^опт", r"опт", r"^цена$", r"^цена", r"цена", r"^price", r"стоимость", r"^руб"],
-    "qty": [r"^кол-?во", r"количество", r"^остаток", r"наличие", r"^qty", r"stock", r"^склад", r"в наличии"],
-    "name": [r"^наименование", r"^название", r"^описание", r"^name", r"^товар"],
+    "qty": [r"^кол-?во", r"количество", r"^остаток", r"^ост\.?$", r"наличие", r"^qty", r"stock", r"^склад",
+            r"в наличии", r"^quantity"],
+    "name": [r"^наименование", r"^название", r"^описание", r"^name", r"^fullname", r"^товар", r"^наим\.?$"],
 }
 SCAN_ROWS = 60
 SAMPLE_ROWS = 300
@@ -134,6 +136,12 @@ class PriceFile:
     doubt: str = ""  # столбец цены похож на текст или наименование похоже на числа
     shot_date: str = ""  # папка-дата внутри «Прайсы», если прайсы лежат по дням
     why: str = ""  # почему шапка или бренд не узнались сами
+    data_from: int = -1  # первая строка с ценами; у файла без шапки — первая строка листа
+    notes: list = field(default_factory=list)  # что программа поправила или в чём сомневается
+
+    @property
+    def headerless(self) -> bool:
+        return bool(self.header) and self.data_from <= self.header.row
 
     @property
     def id(self) -> str:
@@ -395,13 +403,14 @@ def _qty(value) -> float | None:
     return None
 
 
-OFFER_VERSION = 1
+OFFER_VERSION = 2
 _OFFER_MEM: dict[str, list[tuple]] = {}
 
 
-def _offer_token(path: Path, header_row: int, cols: dict, fixed_brand: str) -> str:
+def _offer_token(path: Path, header_row: int, cols: dict, fixed_brand: str, data_from: int = -1) -> str:
     st = path.stat()
-    raw = f"{OFFER_VERSION}|{path.resolve()}|{st.st_mtime_ns}|{st.st_size}|{header_row}|{sorted(cols.items())}|{fixed_brand}"
+    raw = (f"{OFFER_VERSION}|{path.resolve()}|{st.st_mtime_ns}|{st.st_size}|{header_row}|{sorted(cols.items())}"
+           f"|{fixed_brand}|{data_from}")
     return hashlib.sha1(raw.encode()).hexdigest()
 
 
@@ -486,17 +495,20 @@ def read_offers(pf: PriceFile) -> None:
         return
     c = pf.cols
     # Цены собираются по всему листу. У прайса в памяти только начало — полный лист берём из кэша.
-    data = pf.sheet.full_grid()[pf.header.row + pf.header.depth:]
+    first = pf.data_from if pf.data_from >= 0 else pf.header.row + pf.header.depth
+    data = pf.sheet.full_grid()[first:]
+    # У файла без шапки «шапка» — это строка с ценой, её тоже читаем.
+    title = "" if pf.headerless else norm_text(pf.header.raw[c["article"]])
     for i, row in enumerate(data):
         art = clean(row[c["article"]]) if c["article"] < len(row) else ""
         price = num(row[c["price"]]) if c["price"] < len(row) else None
         key = norm_article(art)
-        if not key or not price or price <= 0 or norm_text(art) == norm_text(pf.header.raw[c["article"]]):
+        if not key or not price or price <= 0 or (title and norm_text(art) == title):
             continue
         brand = clean(row[c["brand"]]) if "brand" in c and c["brand"] < len(row) else ""
         brand = brand or pf.fixed_brand
         qty = _qty(row[c["qty"]]) if "qty" in c and c["qty"] < len(row) else None
-        pf.offers.append(Offer(brand, art, price, qty, pf.header.row + pf.header.depth + i + 1, key))
+        pf.offers.append(Offer(brand, art, price, qty, first + i + 1, key))
 
 
 def _manual(sheet: Sheet, own: dict) -> tuple[Header | None, dict[str, int]]:
@@ -563,13 +575,181 @@ def apply_first_profile(sheet: Sheet, profiles: dict) -> tuple[Header | None, di
             for fld, title in wanted.items():
                 if title in norm:
                     cols[fld] = norm.index(title)
-            if all(f in cols for f in REQUIRED):
+            if all(f in cols for f in REQUIRED) and num(raw[cols["price"]]) is None:
                 return Header(sheet, start, 1, raw, [v.lower() for v in raw]), cols
     return None, {}
 
 
+# ---------------------------------------------------------------- проверка столбцов по содержимому
+
+_NOT_BRAND = re.compile(r",|->|<-|\d{2}\s*>|\(\d|\d{4}")
+
+
+def _brand_like(text: str) -> bool:
+    """Похоже на название бренда: коротко, без запятых, годов и «02->», не больше трёх слов."""
+    return len(text) <= 30 and len(text.split()) <= 3 and not _NOT_BRAND.search(text)
+
+
+def _column_values(sheet: Sheet, start: int, idx: int, limit: int = 300) -> list[str]:
+    out = []
+    for row in sheet.grid[start: start + limit]:
+        if idx < len(row):
+            text = clean(row[idx])
+            if text:
+                out.append(text)
+    return out
+
+
+def _brand_column_stats(sheet: Sheet, start: int, idx: int, known: set[str]) -> tuple[float, float, float]:
+    """(доля похожих на бренд, доля известных брендов, доля разных значений)."""
+    values = _column_values(sheet, start, idx)
+    if len(values) < 5:
+        return 0.0, 0.0, 1.0
+    shape = sum(_brand_like(v) for v in values) / len(values)
+    hits = sum(1 for v in values if brand_key(v) in known) / len(values) if known else 0.0
+    return shape, hits, len(set(values)) / len(values)
+
+
+def _is_data_row(raw: list[str], cols: dict[str, int]) -> bool:
+    """Строка с артикулом и числом в столбце цены — это данные, а не шапка."""
+    a, p = cols.get("article"), cols.get("price")
+    if a is None or p is None or a >= len(raw) or p >= len(raw):
+        return False
+    price = num(raw[p])
+    return bool(clean(raw[a])) and price is not None and price > 0
+
+
+def _data_from(sheet: Sheet, header: Header, cols: dict[str, int]) -> int:
+    """Первая строка с ценами. Если «шапка» сама строка с ценой — файл без шапки: идём вверх до начала данных."""
+    if not _is_data_row(header.raw, cols):
+        return header.row + header.depth
+    row = header.row
+    while row > 0 and _is_data_row([clean(v) for v in sheet.grid[row - 1]], cols):
+        row -= 1
+    return row
+
+
+def _check_brand(pf: PriceFile, known: set[str]) -> None:
+    """В столбце бренда должны быть бренды. «CITROEN C5, PEUGEOT 407» — это модели машин, а не бренд."""
+    idx = pf.cols.get("brand")
+    if idx is None or pf.fixed_brand or not pf.header:
+        return
+    start = max(pf.data_from, 0)
+    shape, hits, _ = _brand_column_stats(pf.sheet, start, idx, known)
+    if shape >= 0.6 and (not known or hits >= 0.02 or shape >= 0.9):
+        return
+    width = max((len(r) for r in pf.sheet.grid[start: start + 50]), default=0)
+    best = None
+    for alt in range(width):
+        if alt in pf.cols.values():
+            continue
+        if _numeric_share(pf.sheet, start, alt, 60) > 0.35:
+            continue
+        a_shape, a_hits, a_distinct = _brand_column_stats(pf.sheet, start, alt, known)
+        if a_shape < 0.85 or (a_hits < 0.1 and a_distinct > 0.3) or a_hits <= hits:
+            continue
+        score = (a_hits, a_shape)
+        if best is None or score > best[0]:
+            best = (score, alt)
+    title = pf.header.raw[idx] if idx < len(pf.header.raw) else ""
+    was = f"{pf.header.letter(idx)}" + (f" «{title}»" if title and not pf.headerless else "")
+    if best is None:
+        if shape < 0.6:
+            pf.notes.append(f"в столбце бренда {was} не похоже на бренды — проверьте столбец бренда")
+        return
+    alt = best[1]
+    alt_title = pf.header.raw[alt] if alt < len(pf.header.raw) else ""
+    now = f"{pf.header.letter(alt)}" + (f" «{alt_title}»" if alt_title and not pf.headerless else "")
+    if pf.status == "manual":
+        pf.notes.append(f"в столбце бренда {was} не бренды (похоже на модели машин); бренды, похоже, в столбце {now}")
+        return
+    pf.cols["brand"] = alt
+    pf.notes.append(f"бренд взят из столбца {now}: в {was} не бренды, а, похоже, модели машин")
+
+
+def _check_qty(pf: PriceFile) -> None:
+    """Наличие, где почти везде 1, а рядом столбец с разными количествами, — скорее кратность."""
+    idx = pf.cols.get("qty")
+    if idx is None or not pf.header:
+        return
+    start = max(pf.data_from, 0)
+    values = [num(v) for v in _column_values(pf.sheet, start, idx)]
+    values = [v for v in values if v is not None]
+    if len(values) < 20 or sum(1 for v in values if v == 1) / len(values) < 0.95:
+        return
+    width = max((len(r) for r in pf.sheet.grid[start: start + 50]), default=0)
+    for alt in range(width):
+        if alt in pf.cols.values():
+            continue
+        raw = _column_values(pf.sheet, start, alt)
+        nums = [num(v) for v in raw]
+        nums = [v for v in nums if v is not None]
+        if len(raw) < 20 or len(nums) / len(raw) < 0.9:
+            continue
+        if any(v != int(v) or v < 0 or v >= 100000 for v in nums):
+            continue
+        if len(set(nums)) < 4 or sum(1 for v in nums if v == 1) / len(nums) >= 0.95:
+            continue
+        title = pf.header.raw[alt] if alt < len(pf.header.raw) else ""
+        was = pf.header.letter(idx)
+        now = pf.header.letter(alt) + (f" «{title}»" if title and not pf.headerless else "")
+        if pf.headerless and pf.status != "manual":
+            pf.cols["qty"] = alt
+            pf.notes.append(f"наличие взято из столбца {now}: в {was} почти везде 1 — это кратность")
+        else:
+            pf.notes.append(f"в столбце наличия {was} почти везде 1 — похоже на кратность; остаток, видимо, в {now}")
+        return
+
+
+def _check_article(pf: PriceFile, pairs: set) -> None:
+    """Какой столбец даёт больше совпадений с кроссами: выбранный артикул или соседний («Кросс-номера» и т. п.)."""
+    if not pairs or not pf.header or "article" not in pf.cols:
+        return
+    start = max(pf.data_from, 0)
+    rows = pf.sheet.grid[start: start + 400]
+    if len(rows) < 20:
+        return
+    b = pf.cols.get("brand")
+    brands = []
+    for row in rows:
+        text = clean(row[b]) if b is not None and b < len(row) else ""
+        brands.append(brand_key(text or pf.fixed_brand))
+    chosen = pf.cols["article"]
+
+    def hits(col):
+        n = 0
+        for row, bk in zip(rows, brands):
+            if col >= len(row):
+                continue
+            key = norm_article(clean(row[col]))
+            if key and (bk, key) in pairs:
+                n += 1
+        return n
+
+    base = hits(chosen)
+    width = max((len(r) for r in rows[:50]), default=0)
+    best = None
+    for alt in range(width):
+        if alt in pf.cols.values():
+            continue
+        if _numeric_share(pf.sheet, start, alt, 60) > 0.95:
+            continue
+        n = hits(alt)
+        if n >= max(5, 2 * base) and (best is None or n > best[0]):
+            best = (n, alt)
+    if best:
+        n, alt = best
+        title = pf.header.raw[alt] if alt < len(pf.header.raw) else ""
+        now = pf.header.letter(alt) + (f" «{title}»" if title and not pf.headerless else "")
+        pf.notes.append(
+            f"столбец {now} совпадает с кроссами чаще выбранного артикула {pf.header.letter(chosen)}"
+            f" ({n} против {base} в первых {len(rows)} строках) — проверьте столбец артикула"
+        )
+
+
 def load_one(sheet: Sheet, own: dict, profiles: dict, known_suppliers: list[str],
-             competitor_brands: list[str] | None = None, supplier_layouts: dict | None = None) -> PriceFile:
+             competitor_brands: list[str] | None = None, supplier_layouts: dict | None = None,
+             known_brands: set | None = None, cross_pairs: set | None = None) -> PriceFile:
     folder = supplier_folder(sheet.file)
     name_supplier, city = guess_supplier(sheet.file.name, known_suppliers)
     folder_name = match_known(folder, known_suppliers) or clean(folder) if folder else ""
@@ -625,12 +805,19 @@ def load_one(sheet: Sheet, own: dict, profiles: dict, known_suppliers: list[str]
         enabled=own.get("enabled", True), folder=folder, name_supplier=name_supplier,
         supplier_from=supplier_from, mismatch=mismatch, shot_date=price_date(sheet.file), why=why,
     )
+    if header and all(f in cols for f in REQUIRED):
+        pf.data_from = _data_from(sheet, header, cols)
+        known = set(known_brands or ()) | {brand_key(b) for b in competitor_brands or [] if brand_key(b)}
+        _check_brand(pf, known)
+        _check_qty(pf)
+        _check_article(pf, cross_pairs or set())
+        cols = pf.cols
     if header and not all(f in cols for f in REQUIRED):
         pf.problem = "укажите столбцы артикула и цены"
     elif header and "brand" not in cols and not pf.fixed_brand:
         pf.problem = "нет столбца бренда — укажите бренд для всего прайса"
     if header and all(f in cols for f in REQUIRED):
-        token = _offer_token(sheet.file, header.row, cols, pf.fixed_brand)
+        token = _offer_token(sheet.file, header.row, cols, pf.fixed_brand, pf.data_from)
         cached = _load_offers(token)
         if cached is not None:
             pf.offers = cached
@@ -638,7 +825,7 @@ def load_one(sheet: Sheet, own: dict, profiles: dict, known_suppliers: list[str]
             read_offers(pf)
             _store_offers(token, pf.offers)
     pf.checks = _column_checks(pf)
-    pf.doubt = _doubt(pf.checks)
+    pf.doubt = ". ".join(x for x in [_doubt(pf.checks), *pf.notes] if x)
     if header and not pf.offers:
         pf.problem = pf.problem or "не нашлось ни одной строки с артикулом и ценой"
     if not header and manual:
@@ -650,7 +837,7 @@ def load_one(sheet: Sheet, own: dict, profiles: dict, known_suppliers: list[str]
 
 def can_remember(pf: PriceFile) -> bool:
     titles = pf.column_titles()
-    return bool(pf.header and pf.offers and all(titles.get(f) for f in REQUIRED))
+    return bool(pf.header and pf.offers and not pf.headerless and all(titles.get(f) for f in REQUIRED))
 
 
 def file_settings(files: dict, sheet: Sheet) -> dict:
@@ -681,6 +868,10 @@ def profiles_from_manual(sheets: list[Sheet], files: dict, known_suppliers: list
                 titles[key] = header.raw[idx]
         if not all(titles.get(f) for f in REQUIRED):
             continue
+        if num(titles["price"]) is not None:
+            # «Шапка» указана на строке с ценами — это файл без шапки. Его «названия» —
+            # чей-то артикул и цена, по ним нельзя узнавать другие файлы.
+            continue
         boot_step("Настройки прайсов", sheet.file.name)
         signature = " | ".join(f"{k}={norm_text(titles.get(k, ''))}" for k in ("brand", "article", "price"))
         learned.setdefault(signature, {"columns": titles, "example": sheet.file.name})
@@ -707,7 +898,8 @@ def supplier_layouts_from(sheets: list[Sheet], files: dict) -> dict[str, dict]:
 
 
 def load_price_files(sheets: list[Sheet], profiles: dict, files: dict, known_suppliers: list[str],
-                      competitor_brands: list[str] | None = None, learn_sheets: list[Sheet] | None = None) -> list[PriceFile]:
+                      competitor_brands: list[str] | None = None, learn_sheets: list[Sheet] | None = None,
+                      known_brands: set | None = None, cross_pairs: set | None = None) -> list[PriceFile]:
     """sheets — кандидаты в прайсы; profiles — сохранённые форматы; files — настройки конкретных файлов.
 
     learn_sheets — откуда брать ручные столбцы поставщиков, если это не те же sheets:
@@ -723,6 +915,7 @@ def load_price_files(sheets: list[Sheet], profiles: dict, files: dict, known_sup
         boot_step("Разбираю прайс", f"{n} из {total} · {sheet.file.name}")
         loaded.append(load_one(
             sheet, file_settings(files, sheet), merged, known_suppliers, competitor_brands, layouts,
+            known_brands, cross_pairs,
         ))
     return loaded
 
@@ -806,7 +999,7 @@ def file_shape(pf: PriceFile) -> str:
     if not pf.header:
         return "шапка не найдена"
     row = pf.sheet.grid[pf.header.row] if pf.header.row < len(pf.sheet.grid) else []
-    bits = [f"шапка {pf.header.row + 1}"]
+    bits = [f"без шапки, цены с {pf.data_from + 1}-й строки" if pf.headerless else f"шапка {pf.header.row + 1}"]
     left = _leading_blank(row)
     if left:
         bits.append(f"слева {left} пустых")
@@ -833,6 +1026,12 @@ def layout_signature(pf: PriceFile) -> str:
     if pf.header:
         row = pf.sheet.grid[pf.header.row] if pf.header.row < len(pf.sheet.grid) else []
         titles = pf.column_titles()
+        if pf.headerless:
+            parts = ["headerless", f"left={_leading_blank(row)}"]
+            for key in ("brand", "article", "price", "qty", "name"):
+                if key in pf.cols:
+                    parts.append(f"{key}={pf.header.letter(pf.cols[key])}")
+            return "|".join(parts)
         parts = [f"row={pf.header.row + 1}", f"left={_leading_blank(row)}"]
         for key in ("brand", "article", "price", "qty", "name"):
             if key in pf.cols:
@@ -888,6 +1087,7 @@ def _grid_lines(pf: PriceFile) -> list[str]:
 
 
 LAYOUT_NAME = "Устройство прайсов.txt"
+_STATUS_WORDS = {"auto": "узнан сам", "saved": "по сохранённой форме", "manual": "настроен вручную", "none": "не узнан"}
 
 
 def layout_text(files: list[PriceFile], build: str = "") -> str:
@@ -924,7 +1124,9 @@ def layout_text(files: list[PriceFile], build: str = "") -> str:
         lines.append("Файлы:")
         for pf in group:
             note = f", {pf.problem}" if pf.problem else ""
-            lines.append(f"- {_where(pf)} — {len(pf.offers)} цен, {pf.status}{note}")
+            lines.append(f"- {_where(pf)} — {len(pf.offers)} цен, {_STATUS_WORDS.get(pf.status, pf.status)}{note}")
+            for text in pf.notes:
+                lines.append(f"    ! {text}")
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"
 
@@ -962,6 +1164,9 @@ def describe(pf: PriceFile, sample: int = 6) -> dict:
         "shape": file_shape(pf),
         "checks": pf.checks,
         "doubt": pf.doubt,
+        "notes": list(pf.notes),
+        "headerless": pf.headerless,
+        "data_from": pf.data_from + 1 if pf.header else None,
         "why": pf.why,
         "can_remember": can_remember(pf),
         "rows": pf.sheet.rows,

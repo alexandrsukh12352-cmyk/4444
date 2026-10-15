@@ -249,37 +249,11 @@ def test_full_report_formulas_match_python(tmp_path, src, settings):
     assert any(str(c.value).startswith("=IF") for c in ws[2] if isinstance(c.value, str))
 
 
-def test_quick_report_is_short_and_values_match(tmp_path, src, settings):
-    opt, prep, result, wb = _build(tmp_path, src, settings, report_kind="quick", rec={"enabled": True})
-    assert wb.sheetnames[0] == "Отчет" and "Параметры" not in wb.sheetnames
-    assert {"ПСТ", "СБС", "Продажи"} <= set(wb.sheetnames)
-    assert wb["Продажи"].sheet_state == "hidden"
-    assert result.path.name == "ADVICS Тормозные диски.xlsx"
-    ws = wb["Отчет"]
-    head = [c.value for c in ws[3]]
-    assert head[:4] == ["Код товара", "Артикул", "Наименование", "Разновидность"]
-    assert "Разновидность" in head and "Автопарк" in head and "Рек. кат. А" in head
-    assert "Закупочная цена" not in head and "СБС план" not in head
-    n = _row(ws, 130909)
-    cols = _header(ws)
-    letter = openpyxl.utils.get_column_letter(cols["Кат. А"])
-    # в быстром отчёте Кат. А — значение, цена конкурента тоже значение, а ВР и суммы — формулы
-    assert ws[f"{letter}{n}"].value == pytest.approx(next(r.cat_a for r in prep.kept if r.code == "130909"))
-    price_letter = openpyxl.utils.get_column_letter(cols["Brembo цена"])
-    assert isinstance(ws[f"{price_letter}{n}"].value, float)
-    vr = openpyxl.utils.get_column_letter(cols["ВР 1"])
-    assert str(ws[f"{vr}{n}"].value).startswith("=IF(")
-    assert cell(wb, "Отчет", f"{vr}{n}") == pytest.approx(
-        1 - next(r.sbs / r.cat_a for r in prep.kept if r.code == "130909")
-    )
-    assert ws.freeze_panes.endswith("4")
-
-
 def test_subgroup_sheets_and_modes(tmp_path, src, settings):
     half = len(src.pst) // 2
     pst = [dataclasses.replace(p, subgroup="Спортивные тормозные диски") if i < half else p for i, p in enumerate(src.pst)]
     split = dataclasses.replace(src, pst=pst)
-    for kind in ("full", "quick"):
+    for kind in ("full",):
         for mode in ("sheets", "single"):
             for enabled in (True, False):
                 opt = R.Options(**GROUP, report_kind=kind, subgroup_mode=mode, rec={"enabled": enabled, "target": "avg" if enabled else "main"})

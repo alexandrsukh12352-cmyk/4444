@@ -101,11 +101,11 @@ def test_individual_settings_are_saved_apart_from_the_template(tmp_path, monkeyp
         "ui": "template",
         "brand": "ADVICS",
         "group": "Тормозные диски",
-        "report_kind": "quick",
+        "report_kind": "full",
         "custom": {"filters": {"new": "exclude"}, "cross_split": "abc", "price_source": "prices", "rec": {"enabled": True, "target": "first"}},
     }})
     saved = settings_mod.Settings.load().options
-    assert saved["ui"] == "template" and saved["report_kind"] == "quick"
+    assert saved["ui"] == "template" and saved["report_kind"] == "full"
     assert saved["custom"]["filters"] == {"new": "exclude"}
     assert saved["custom"]["cross_split"] == "abc"
     assert saved["custom"]["rec"]["target"] == "first"

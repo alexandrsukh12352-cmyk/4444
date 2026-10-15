@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import re
 import statistics
 from collections import Counter, defaultdict
 from difflib import SequenceMatcher
@@ -24,25 +25,48 @@ MIN_BRAND_ROWS = 20  # сравниваем медиану бренда, тол�
 # ---------------------------------------------------------------- похожие бренды
 
 
-def _similar(key: str, targets: dict[str, str]) -> tuple[str, float] | None:
+_WORDS = re.compile(r"[0-9A-ZА-ЯЁ]+")
+
+
+def _words(text: str) -> list[str]:
+    return _WORDS.findall(str(text).upper().replace("Ё", "Е"))
+
+
+def _similar(name: str, key: str, targets: dict[str, str]) -> tuple[str, float] | None:
+    """Похож ли бренд на конкурента. Совпадение — целым словом, а не куском слова.
+
+    «Kashiyama Japan» → KASHIYAMA (слово). «G-Brake» → GBRAKE (слова слитно).
+    «HERMANN» не похож на MANN: это кусок слова. Опечатки («BREMBBO») — по сходству букв.
+    """
+    words = _words(name)
     best = None
     for target in targets:
-        if len(key) >= 4 and len(target) >= 4 and (target in key or key in target):
+        score = 0.0
+        if target in words and len(words) > 1:
             score = 0.95
-        else:
-            score = SequenceMatcher(None, key, target).ratio()
-        if score >= 0.8 and (best is None or score > best[1]):
+        elif len(target) >= 4 and len(words) > 1 and any(
+            "".join(words[i:j]) == target for i in range(len(words)) for j in range(i + 2, len(words) + 1)
+        ):
+            score = 0.95
+        elif len(key) >= 5 and len(target) >= 5 and key[0] == target[0]:
+            ratio = SequenceMatcher(None, key, target).ratio()
+            if ratio >= 0.86:
+                score = ratio
+        if score and (best is None or score > best[1]):
             best = (target, score)
     return best
 
 
 def brand_hints(files: list[PriceFile], competitor_names: list[str], crosses: dict | None = None,
-                limit: int = 40) -> list[dict]:
+                limit: int = 200, ignore: set | None = None) -> list[dict]:
     """Бренды из прайсов и кроссов, которые похожи на конкурента, но с ним не совпали.
 
     «Kashiyama Japan», «LYNX», «G-Brake Germany» — кандидаты в синонимы. Сам синоним человек
-    подтверждает в окне: программа ничего не склеивает без спроса.
+    подтверждает в окне: программа ничего не склеивает без спроса. Отклонённые («не тот бренд»)
+    больше не предлагаются. Строки, не похожие на бренд («TOYOTA Camry 06->», «CITROEN C5,
+    PEUGEOT 407»), — это не бренды, а модели машин из чужого столбца; их не предлагаем.
     """
+    ignore = ignore or set()
     targets = {}
     for name in competitor_names:
         key = brand_key(name)
@@ -74,9 +98,11 @@ def brand_hints(files: list[PriceFile], competitor_names: list[str], crosses: di
                     names.setdefault(raw, str(row.cross_brand).strip())
     out = []
     for raw, n in seen.most_common():
-        if brand_key(names[raw]) in targets:
-            continue  # уже совпадает, в том числе через синоним
-        hit = _similar(raw, targets)
+        if brand_key(names[raw]) in targets or raw in ignore:
+            continue  # уже совпадает, в том числе через синоним, или человек сказал «не тот бренд»
+        if not prices._brand_like(names[raw]):
+            continue
+        hit = _similar(names[raw], raw, targets)
         if not hit:
             continue
         out.append({

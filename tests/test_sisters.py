@@ -54,7 +54,7 @@ def test_printed_1c_oem_catalog_fills_the_sister_column(tmp_path):
 
     ws = SimpleNamespace(company=SimpleNamespace(pst=src.pst, acp={}, discounts={}), packs=[], acp_slices=[])
     src.sister_prices = price_book(ws, Settings.load(None))
-    opt = Options(brand="ADVICS", group="Тормозные диски", report_kind="quick", sheet_filters=[])
+    opt = Options(brand="ADVICS", group="Тормозные диски", sheet_filters=[])
     prep = prepare(src, Settings.load(None), opt)
     row = next(r for r in prep.kept if r.article == "A6R173B")
     assert row.sister_price == 1500
@@ -121,7 +121,7 @@ def test_shared_oem_puts_sister_price_after_competitors(tmp_path):
         ("AVANTECH", norm_article("BR0267S")): 900.0,
     }
     settings = Settings.load(None)
-    opt = Options(brand="ADVICS", group="Тормозные диски", report_kind="quick")
+    opt = Options(brand="ADVICS", group="Тормозные диски")
     prep = prepare(src, settings, opt)
     row = prep.kept[0]
     # Два сопоставимых артикула, 1500 и 900. В столбец идёт минимум.
@@ -148,14 +148,14 @@ def test_filter_pair_and_no_column_for_other_brands(tmp_path):
     src.oem_rows = src.oem
     src.sister_prices = {("DF", norm_article("DF100")): 500.0}
     settings = Settings.load(None)
-    opt = Options(brand="AVANTECH", group="Фильтры", report_kind="quick")
+    opt = Options(brand="AVANTECH", group="Фильтры")
     row = prepare(src, settings, opt).kept[0]
     assert row.sister_brand == "DF"
     assert row.sister_price == 500
 
     other = scan([folder])
     other.oem_rows = other.oem
-    pads = prepare(other, settings, Options(brand="AVANTECH", group="Тормозные диски", report_kind="quick"))
+    pads = prepare(other, settings, Options(brand="AVANTECH", group="Тормозные диски"))
     # Диск AVANTECH смотрит на ADVICS. В справочнике у ADVICS тот же ОЕМ, цены нет — артикул есть.
     assert pads.kept[0].sister_brand == "ADVICS"
     assert pads.kept[0].sister_price is None
@@ -169,7 +169,7 @@ def test_sister_column_is_next_to_cat_a_even_without_oem_file(tmp_path):
     src.oem_rows = []
     src.oem = []
     settings = Settings.load(None)
-    opt = Options(brand="ADVICS", group="Тормозные диски", report_kind="quick")
+    opt = Options(brand="ADVICS", group="Тормозные диски")
     prep = prepare(src, settings, opt)
     assert prep.kept[0].sister_brand == "AVANTECH"
     assert prep.kept[0].sister_price is None
@@ -215,7 +215,7 @@ def test_oem_in_1c_folder_prices_the_neighbor_group(tmp_path):
     src = STATE.for_group(root, "ADVICS", "Тормозные диски")
     assert len(src.oem_rows) == 2
     assert price_book(ws, Settings.load(None))[("AVANTECH", norm_article("BR0265S"))] == 1500
-    opt = Options(brand="ADVICS", group="Тормозные диски", report_kind="quick", sheet_filters=["overstock", "sale"])
+    opt = Options(brand="ADVICS", group="Тормозные диски", sheet_filters=["overstock", "sale"])
     result = build_report(src, Settings.load(None), opt, tmp_path)
     wb = openpyxl.load_workbook(result.path)
     wsht = wb["Отчет"]

@@ -129,7 +129,7 @@ def test_funnel_names_the_missing_price_list_and_gaps_book_is_written(tmp_path, 
     assert wb.sheetnames == ["Нет кросса Да", "Да без цены", "Несопоставимо"]
     assert g["no_yes"] == 1 and g["yes_no_price"] == 1
     reason = wb["Да без цены"].cell(3, 9).value
-    assert reason.startswith("цена есть только вне листа 02")
+    assert reason.startswith("цена есть только у поставщиков вне позиционирования")
 
     disks = {"brand": "ADVICS", "group": "Тормозные диски"}
     d = server.api_analyze({"folder": str(tmp_path), "options": disks})

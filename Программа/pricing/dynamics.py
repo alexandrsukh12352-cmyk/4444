@@ -311,7 +311,7 @@ def _snap(files: list[PriceFile], date: str) -> dict[tuple[str, str, str], float
 
 
 def competitor_brand_names(positioning) -> list[str]:
-    """Бренды, с которыми мы сравниваем цены: лист 02 и конкуренты в строках позиционирования."""
+    """Бренды, с которыми мы сравниваем цены: мониторинг поставщиков и конкуренты в строках позиционирования."""
     names: list[str] = []
     seen: set[str] = set()
     for brand in getattr(positioning, "monitoring", {}) or {}:

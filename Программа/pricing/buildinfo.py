@@ -7,8 +7,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-BUILD = "2026-10-15.2"
-BUILD_LABEL = "сборка 15 окт, 2"
+BUILD = "2026-10-15.3"
+BUILD_LABEL = "сборка 15 окт, 3"
 
 
 def column_expectation(brand: str, group: str) -> dict:
@@ -59,12 +59,12 @@ def program_marks() -> list[dict]:
         },
         {
             "name": "Разбор прайсов",
-            "ok": "def price_date" in price_src and "def profiles_from_manual" in price_src and 'id="px-dynamics"' in page,
-            "detail": "Прайсы по папкам-датам и файл «валюта». Повторный расчёт динамики берётся из кэша, если файлы не менялись.",
+            "ok": "def price_date" in price_src and "def _data_from" in price_src and 'id="pa-index"' in page and 'id="dt-calendar"' in page,
+            "detail": "Прайсы по папкам-датам и файл «валюта»: графики на вкладке «Прайсы», календарь и файлы по датам в «Данных». Файл без шапки читается с первой строки, столбец бренда проверяется по содержимому.",
         },
         {
             "name": "Окно загрузки",
-            "ok": "def step" in (_HERE / "bootlog.py").read_text(encoding="utf-8") and 'id="boot"' in page,
-            "detail": "Пока папка читается, видно шаг, имя файла и сколько секунд он уже идёт. Ошибка остаётся на экране.",
+            "ok": "PHASES" in (_HERE / "bootlog.py").read_text(encoding="utf-8") and 'id="boot-steps"' in page,
+            "detail": "Загрузка показана этапами по порядку: что сделано, сколько заняло, что идёт сейчас и сколько файлов осталось. Ошибка остаётся на экране у своего этапа.",
         },
     ]

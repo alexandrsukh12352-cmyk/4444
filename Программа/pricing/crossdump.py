@@ -78,7 +78,7 @@ def write_cross_prices(path: Path, crosses: dict, price_files: list[PriceFile], 
                         stopped = True
                         break
                     if allowed is None:
-                        flag = "бренда нет в листе 02"
+                        flag = "поставщик не мониторит бренд по позиционированию"
                     elif supplier_key(supplier_name) in allowed:
                         flag = "да"
                     else:

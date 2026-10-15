@@ -38,6 +38,9 @@ const S = {
   stockSlice: "both",
   stockEdit: "sale",
   stockProfiles: null,
+  reportArea: "group",
+  tab: "report",
+  pa: { brand: "", path: [], hidden: {} },
 };
 
 // ------------------------------------------------------------------ сеть и уведомления
@@ -82,9 +85,13 @@ function segHtml(choices, value, attr) {
 
 let bootTimer = null;
 
-function showBoot() {
+function showBoot(title) {
   const boot = $("#boot");
   if (!boot) return;
+  const head = $("#boot-title");
+  if (head) head.textContent = title || (S.init ? "Читаю папки" : "Открываю программу");
+  const steps = $("#boot-steps");
+  if (steps) steps.innerHTML = `<li class="active"><i></i><div><b>Жду ответ программы</b></div><span></span></li>`;
   S.bootHold = false;
   S.bootSince = Date.now() / 1000;
   boot.classList.remove("hidden");
@@ -116,8 +123,14 @@ function showBootError(message) {
   const retry = $("#boot-retry");
   if (err) { err.classList.remove("hidden"); err.textContent = message || "Неизвестная ошибка"; }
   if (retry) retry.hidden = false;
-  const stage = $("#boot-stage");
-  if (stage && !stage.textContent) stage.textContent = "Остановка";
+}
+
+function bootRow(ph) {
+  const time = ph.state === "skip" ? "не понадобилось" : ph.elapsed != null ? `${String(ph.elapsed).replace(".", ",")} с` : "";
+  const pr = ph.state === "active" && ph.progress ? ph.progress : null;
+  const bar = pr ? `<div class="boot-bar"><i style="width:${pct(pr[0], pr[1])}%"></i></div>` : "";
+  const detail = (ph.state === "active" || ph.state === "error") && ph.detail ? `<div class="muted">${esc(ph.detail)}</div>` : "";
+  return `<li class="${ph.state}"><i></i><div><b>${esc(ph.title)}</b>${detail}${bar}</div><span>${esc(time)}</span></li>`;
 }
 
 async function pollBoot() {
@@ -126,12 +139,10 @@ async function pollBoot() {
     const res = await fetch("/api/progress");
     const p = await res.json();
     if (p.done && !p.error && p.started && p.started + 0.3 < (S.bootSince || 0)) return;
-    const stage = $("#boot-stage");
-    const detail = $("#boot-detail");
     const time = $("#boot-time");
-    if (stage) stage.textContent = p.stage || "Жду ответ";
-    if (detail) detail.textContent = p.detail || "";
-    if (time) time.textContent = p.stage ? `${p.stage_elapsed} с на этом шаге · всего ${p.elapsed} с` : "";
+    if (time) time.textContent = p.started ? `${String(p.elapsed).replace(".", ",")} с` : "";
+    const steps = $("#boot-steps");
+    if (steps && (p.phases || []).length) steps.innerHTML = p.phases.map(bootRow).join("");
     const log = $("#boot-log");
     if (log) {
       const rows = p.log || [];
@@ -139,10 +150,8 @@ async function pollBoot() {
     }
     if (p.error) showBootError(p.error);
   } catch (e) {
-    const stage = $("#boot-stage");
-    const detail = $("#boot-detail");
-    if (stage) stage.textContent = "Нет ответа от программы";
-    if (detail) detail.textContent = e.message || "";
+    const steps = $("#boot-steps");
+    if (steps) steps.innerHTML = `<li class="error"><i></i><div><b>Нет ответа от программы</b><div class="muted">${esc(e.message || "")} Проверьте, что чёрное окно запуска открыто.</div></div><span></span></li>`;
   }
 }
 
@@ -157,7 +166,7 @@ async function start() {
     monitoring_only: o.monitoring_only !== false, in_stock_only: !!o.in_stock_only,
     subgroup_mode: o.subgroup_mode || "sheets", suggest_threshold: o.suggest_threshold ?? 0.3,
     brand: o.brand || "", group: o.group || "",
-    report_kind: S.init.report_kinds[o.report_kind] ? o.report_kind : "full",
+    report_kind: "full",
     sheet_filters: Array.isArray(o.sheet_filters) ? o.sheet_filters.slice() : (S.init.default_sheet_filters || ["overstock", "sale", "competitor_price"]).slice(),
     green_when: o.green_when === "below" ? "below" : "above",
     money_base: o.money_base === "potential" ? "potential" : "sales",
@@ -187,7 +196,7 @@ async function start() {
   renderSplit();
   renderRecForm();
   paintUi(S.opts.ui, false);
-  bindReportKind();
+  paintReportArea();
   S.ready = true;
   const tag = $("#build-tag");
   if (tag) tag.textContent = S.init.build_label || "";
@@ -291,21 +300,23 @@ function bind() {
   if (pxLayout) pxLayout.onclick = () => writePriceLayout();
   const pxCrosses = $("#px-crosses");
   if (pxCrosses) pxCrosses.onclick = () => writeCrossPrices();
-  const dynFrom = $("#px-dyn-from");
-  if (dynFrom) dynFrom.onchange = () => { S.dynFrom = dynFrom.value; loadDynamics(); };
-  const dynTo = $("#px-dyn-to");
-  if (dynTo) dynTo.onchange = () => { S.dynTo = dynTo.value; loadDynamics(); };
-  const dynLevel = $("#px-dyn-level");
-  if (dynLevel) seg(dynLevel, S.dynLevel || "all", (v) => { S.dynLevel = v; paintDynTable(); });
-  const dynSearch = $("#px-dyn-search");
-  if (dynSearch) dynSearch.oninput = () => paintDynTable();
-  const dynExport = $("#px-dyn-export");
-  if (dynExport) dynExport.onclick = () => writeDynamicsExport();
-  const pxOpen = $("#px-open");
-  if (pxOpen) pxOpen.onclick = () => {
-    if (!S.pxFolder) { toast("Сначала запишите устройство — папка результата откроется после этого"); return; }
+  const paFrom = $("#pa-from");
+  if (paFrom) paFrom.onchange = () => loadAnalytics({ date_from: paFrom.value });
+  const paTo = $("#pa-to");
+  if (paTo) paTo.onchange = () => loadAnalytics({ date_to: paTo.value, date_from: "" });
+  const paBrand = $("#pa-brand");
+  if (paBrand) paBrand.onchange = () => { S.pa.brand = paBrand.value; S.pa.path = []; paintAnalytics(); };
+  const paExport = $("#pa-export");
+  if (paExport) paExport.onclick = () => writePriceExport();
+  const openResult = () => {
+    if (!S.pxFolder) { toast("Папка результата откроется после первой выгрузки"); return; }
     api("/api/open", { path: S.pxFolder }).catch((e) => toast(e.message, "bad"));
   };
+  const pxOpen = $("#px-open");
+  if (pxOpen) pxOpen.onclick = openResult;
+  const paOpen = $("#pa-open");
+  if (paOpen) paOpen.onclick = openResult;
+  seg($("#report-area"), S.reportArea, (v) => { S.reportArea = v; paintReportArea(); });
   const pxSearch = $("#px-search");
   if (pxSearch) pxSearch.oninput = () => { S.pxQuery = pxSearch.value; renderPriceAudit(); };
   const pxFilter = $("#px-filter");
@@ -386,32 +397,30 @@ function paintUi(v, fromClick) {
   if (fromClick) persist();
 }
 
-function bindReportKind() {
-  const apply = (v) => {
-    S.opts.report_kind = v;
-    persist();
-    seg($("#report-kind"), v, apply);
-    seg($("#report-kind-main"), v, apply);
-    updateSummary();
-  };
-  apply(S.opts.report_kind || "full");
+function paintReportArea() {
+  const stock = S.reportArea === "stock";
+  seg($("#report-area"), stock ? "stock" : "group", (v) => { S.reportArea = v; paintReportArea(); });
+  document.body.classList.toggle("area-stock", stock);
+  const area = $("#stock-area");
+  if (area) area.classList.toggle("hidden", !stock);
+  const flow = $("#flow");
+  if (flow) flow.classList.toggle("area-off", stock);
+  document.querySelectorAll(".group-only").forEach((el) => el.classList.toggle("hidden", stock));
+  $("#actionbar").classList.toggle("hidden", stock || S.tab !== "report");
+  if (stock) renderStockForm();
 }
 
 function showTab(name) {
+  S.tab = name;
   document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("active", t.dataset.tab === name));
-  $("#page-report").classList.toggle("hidden", name !== "report");
-  $("#page-settings").classList.toggle("hidden", name !== "settings");
-  const diag = $("#page-diagnose");
-  if (diag) diag.classList.toggle("hidden", name !== "diagnose");
-  const stock = $("#page-stock");
-  if (stock) stock.classList.toggle("hidden", name !== "stock");
-  const prices = $("#page-prices");
-  if (prices) prices.classList.toggle("hidden", name !== "prices");
-  $("#actionbar").classList.toggle("hidden", name !== "report");
-  if (name === "stock") renderStockForm();
-  if (name === "prices") { renderPriceAudit(); loadDynamics(); }
-  if (name === "settings" && !S.settings) loadSettings();
-  if (name === "diagnose") loadDiagnose();
+  for (const page of ["report", "prices", "data", "settings"]) {
+    const el = $(`#page-${page}`);
+    if (el) el.classList.toggle("hidden", name !== page);
+  }
+  $("#actionbar").classList.toggle("hidden", name !== "report" || S.reportArea === "stock");
+  if (name === "prices") loadAnalytics();
+  if (name === "data") renderPriceAudit();
+  if (name === "settings") { if (!S.settings) loadSettings(); loadDiagnose(); }
 }
 
 function renderDiagnose(d) {
@@ -455,7 +464,7 @@ async function writeDiagnose() {
 // ------------------------------------------------------------------ шаг 1: папка
 
 async function rescan(manual = false) {
-  showBoot();
+  showBoot(S.init && S.scan ? "Читаю папки" : "Открываю программу");
   const folder = $("#folder").value.trim();
   $("#docs").innerHTML = `<div class="docs">${Array.from({ length: 9 }, () => `<div class="doc"><div class="skeleton" style="width:60%"></div><div class="skeleton" style="width:90%;margin-top:6px"></div></div>`).join("")}</div>`;
   $("#rescan").disabled = true;
@@ -474,8 +483,9 @@ async function rescan(manual = false) {
     paintBuildAll();
     renderRatesNote();
     if (manual) toast(S.scan.reread ? `Заново прочитано файлов: ${S.scan.reread}` : "Даты файлов те же, разбор уже был сохранён");
-    const pricesPage = $("#page-prices");
-    if (pricesPage && !pricesPage.classList.contains("hidden")) loadDynamics(true);
+    S.analytics = null;
+    if (S.tab === "prices") loadAnalytics();
+    if (S.tab === "data") renderPriceAudit();
     hideBoot();
     return true;
   } catch (e) {
@@ -518,34 +528,30 @@ function renderDocs() {
     <div class="doc optional ${pf.length ? "found" : ""}">
       <div class="name"><span class="dot"></span>Прайсы поставщиков${pf.length ? `<span class="muted" style="font-weight:500">· ${pf.length}</span>` : ""}</div>
       <div class="where" title="${esc(pf.map((f) => f.file).join(", "))}">${pf.length ? esc(pf.map(pfLabel).join(", ")) : "не найдены"}</div>
-      <div class="hint">разбор распознавания — вкладка «Прайсы»</div>
+      <div class="hint">календарь и распознавание — ниже</div>
     </div>`;
   const notes = [...sc.warnings.map((w) => `<div class="note">${esc(w)}</div>`), ...sc.skipped.map((w) => `<div class="note info">${esc(w)}</div>`)];
-  const hasBase = sc.groups.pst.length || sc.groups.acp.length || (sc.queue || []).length;
+  const hasBase = sc.groups.pst.length || (sc.queue || []).length;
   let empty = "";
   if (!sc.files) {
     empty = `<div class="empty"><h3>Папка пуста</h3><p>Положите выгрузки из 1С во «Входящие» или в папку группы: ПСТ, СБС, Продажи, АЦПКД. Кроссы и прайсы — в свои папки.</p><p class="mono">${esc(sc.folder)}</p></div>`;
   } else if (!hasBase) {
-    empty = `<div class="empty"><h3>Не найдено ни ПСТ, ни АЦПКД</h3><p>Без одного из них отчёт не построить. Проверьте, что выгрузка сохранена как .xlsx или .csv и в ней есть шапка с названиями столбцов.</p></div>`;
+    empty = `<div class="empty"><h3>ПСТ не найден</h3><p>Отчёт строится от ПСТ. Проверьте во вкладке «Данные», что выгрузка лежит во «Входящие» или в папке группы и сохранена как .xlsx или .csv с шапкой.</p></div>`;
   }
   $("#docs").innerHTML = `<div class="docs">${docs}${priceTile}</div>`;
   const scanNote = $("#scan-note");
   if (scanNote) scanNote.innerHTML = `${notes.length ? `<div class="notes">${notes.join("")}</div>` : ""}${empty}`;
   if (!sc.files || !hasBase) $("#card-folder").open = true;
+  if (!sc.files && S.tab !== "data") showTab("data");
   $("#flow").classList.toggle("hidden", !hasBase);
 }
 
 // ------------------------------------------------------------------ шаг 2: группа и основа
 
-function availableBases() {
-  const pst = (S.scan.groups.pst || []).length || (S.scan.queue || []).length;
-  return { pst: pst > 0, acp: (S.scan.groups.acp || []).length > 0 };
-}
-
 function listedGroups() {
   if (!S.scan) return [];
-  if (S.opts.base === "pst" && (S.scan.queue || []).length) return S.scan.queue;
-  return (S.scan.groups && S.scan.groups[S.opts.base]) || [];
+  if ((S.scan.queue || []).length) return S.scan.queue;
+  return (S.scan.groups && S.scan.groups.pst) || [];
 }
 
 function currentGroup() {
@@ -723,8 +729,7 @@ function renderContext() {
 }
 
 function chooseGroup() {
-  const bases = availableBases();
-  if (!bases[S.opts.base]) S.opts.base = bases.pst ? "pst" : "acp";
+  S.opts.base = "pst";
   const groups = listedGroups();
   if (!groups.some((g) => g.brand === S.opts.brand && g.group === S.opts.group) && groups.length) {
     const first = groups.find((g) => g.ready) || groups[0];
@@ -741,7 +746,6 @@ function chooseGroup() {
 }
 
 function renderGroup() {
-  const bases = availableBases();
   const all = listedGroups();
   const q = ($("#group-search").value || "").trim().toLowerCase();
   const groups = q ? all.filter((g) => `${g.brand} ${g.group} ${g.reason || ""}`.toLowerCase().includes(q)) : all;
@@ -803,17 +807,6 @@ function renderGroup() {
   }
   const selected = $("#groups").querySelector(".group-card.on");
   if (selected && !q) selected.scrollIntoView({ block: "nearest" });
-  const baseEl = $("#base");
-  if (baseEl) {
-    baseEl.querySelectorAll("button").forEach((b) => (b.disabled = !bases[b.dataset.v]));
-    seg(baseEl, S.opts.base, (v) => { S.opts.base = v; S.opts.sources = {}; chooseGroup(); });
-  }
-  const baseNote = $("#base-note");
-  if (baseNote) {
-    baseNote.textContent = S.opts.base === "pst"
-      ? "Товары — из ПСТ. Цены конкурентов и пропуски можно добирать из АЦПКД."
-      : "Товары — из АЦПКД. Группа заказа, закупка, разновидность и оверсток — из ПСТ по коду товара.";
-  }
   const g = all.find((x) => x.brand === S.opts.brand && x.group === S.opts.group);
   const subs = g ? g.subgroups : [];
   $("#subgroups").innerHTML = subs.map((s) => `<span class="tag">${esc(s.name || "без подгруппы")} <b>${fmtInt(s.count)}</b></span>`).join("");
@@ -1068,8 +1061,20 @@ function renderPriceControls() {
   $("#monitoring-note").textContent = notes.join(" ");
 }
 
+function latestPriceDate(files) {
+  const dates = [...new Set((files || []).map((f) => f.date).filter(Boolean))];
+  dates.sort((a, b) => dateKey(a) - dateKey(b));
+  return dates.length ? dates[dates.length - 1] : "";
+}
+
+function dateKey(text) {
+  const m = String(text || "").match(/^(\d{2})\.(\d{2})\.(\d{4})$/);
+  return m ? Number(`${m[3]}${m[2]}${m[1]}`) : 99999999;
+}
+
 function renderPriceFiles() {
-  const files = S.priceFiles;
+  const latest = latestPriceDate(S.priceFiles);
+  const files = latest ? S.priceFiles.filter((f) => !f.date || f.date === latest) : S.priceFiles;
   const off = S.opts.price_source === "acp";
   if (!files.length) {
     $("#price-files").innerHTML = `<div class="empty compact"><h3>Прайсов в папке нет</h3>
@@ -1091,7 +1096,7 @@ function renderPriceFiles() {
         <label class="switch" title="Использовать прайс"><input type="checkbox" data-enable="${esc(f.id)}" ${f.enabled ? "checked" : ""}><span></span></label>
         <div class="pf-main">
           <div class="pf-title"><b>${esc(pfLabel(f))}</b>
-            ${f.monitored ? "" : `<span class="pill warn" title="Поставщика нет на листе 02 позиционирования">нет в позиционировании</span>`}</div>
+            ${f.monitored ? "" : `<span class="pill warn" title="Поставщика нет в мониторинге позиционирования">нет в позиционировании</span>`}</div>
           <div class="pf-file" title="${esc(f.id)}">${esc(f.id)}</div>
         </div>
         <div class="pf-stat"><span class="pill ${kind}">${st}</span>
@@ -1112,6 +1117,7 @@ function renderPriceFiles() {
       ${open ? `<div class="pf-list">${list.map(card).join("")}</div>` : ""}`;
   }).join("");
   $("#price-files").innerHTML = `${off ? `<div class="note info">Сейчас цены берутся только из АЦПКД — прайсы не используются.</div>` : ""}
+    ${latest ? `<div class="muted small-text" style="margin-bottom:8px">Прайсы на <b>${esc(latest)}</b> — последнюю дату выгрузки.</div>` : ""}
     <div class="pf-list ${off ? "dim" : ""}">${blocks}</div>
     <div class="muted small-text" style="margin-top:8px">Прайсы одного поставщика свёрнуты. В отчёт попадает минимальная цена конкурента.</div>`;
   bindPriceFiles();
@@ -1119,8 +1125,7 @@ function renderPriceFiles() {
     S.priceOpen[b.dataset.supplier] = !S.priceOpen[b.dataset.supplier];
     renderPriceFiles();
   }));
-  const pricesPage = $("#page-prices");
-  if (pricesPage && !pricesPage.classList.contains("hidden")) renderPriceAudit();
+  if (S.tab === "data") renderPriceAudit();
 }
 
 const PX_FROM = { folder: "папка", file: "имя файла", manual: "вручную" };
@@ -1137,22 +1142,7 @@ function priceBad(f) {
   return !!(f.problem || f.doubt || f.status === "none" || !f.offers || f.mismatch || (f.quality && f.quality.length));
 }
 
-function renderPriceAudit() {
-  const kpis = $("#px-kpis");
-  const list = $("#px-list");
-  if (!kpis || !list) return;
-  renderBrandHints();
-  const filterEl = $("#px-filter");
-  const filter = S.pxFilter || "all";
-  if (filterEl) filterEl.querySelectorAll("button").forEach((b) => b.classList.toggle("on", b.dataset.v === filter));
-  const files = S.priceFiles || [];
-  const mon = (S.scan && S.scan.monitoring_suppliers) || [];
-  const monBy = new Map(mon.map((m) => [supplierKey(m.supplier), m]));
-  if (!S.scan) {
-    kpis.innerHTML = "";
-    list.innerHTML = `<div class="card"><div class="empty compact"><h3>Папка ещё не прочитана</h3><p>Откройте вкладку «Отчёт» — программа посмотрит «Данные/Прайсы».</p></div></div>`;
-    return;
-  }
+function priceGroups(files, monBy) {
   const groups = new Map();
   files.forEach((f) => {
     const key = supplierKey(f.supplier) || "—";
@@ -1162,45 +1152,105 @@ function renderPriceAudit() {
     }
     groups.get(key).files.push(f);
   });
-  const rows = [...groups.values()].map((g) => {
+  return [...groups.values()].map((g) => {
     const expected = (monBy.get(g.key) && monBy.get(g.key).brands) || g.files[0].expected_brands || [];
     const found = new Map();
     g.files.forEach((f) => (f.competitor_brands || []).forEach((b) => {
       const k = brandKey(b.brand);
       found.set(k, (found.get(k) || 0) + (b.offers || 0));
     }));
-    const brands = expected.map((name) => ({ name, offers: found.get(brandKey(name)) || 0, hit: found.has(brandKey(name)) }));
     g.found = found;
-    g.brands = brands;
+    g.brands = expected.map((name) => ({ name, offers: found.get(brandKey(name)) || 0, hit: found.has(brandKey(name)) }));
     g.expected = expected;
     g.bad = g.files.filter(priceBad).length;
     g.offers = g.files.reduce((sum, f) => sum + (f.offers || 0), 0);
     g.monitored = monBy.has(g.key);
     return g;
   });
-  rows.sort((a, b) => {
-    const ao = mon.findIndex((m) => supplierKey(m.supplier) === a.key);
-    const bo = mon.findIndex((m) => supplierKey(m.supplier) === b.key);
-    if (ao !== -1 || bo !== -1) return (ao === -1 ? 999 : ao) - (bo === -1 ? 999 : bo);
-    return a.supplier.localeCompare(b.supplier, "ru");
-  });
-  const q = String(S.pxQuery || "").trim().toLowerCase();
-  const hitFile = (f) => !q || [f.file, f.id, f.city, f.problem, f.folder, f.name_supplier, f.supplier,
-    ...(f.competitor_brands || []).map((b) => b.brand)].join(" ").toLowerCase().includes(q);
-  const visible = rows.map((g) => {
-    const filesHit = g.files.filter((f) => hitFile(f) || (q && g.supplier.toLowerCase().includes(q)));
-    const brandHit = !q || g.supplier.toLowerCase().includes(q) || g.brands.some((b) => b.name.toLowerCase().includes(q));
-    return { ...g, files: brandHit && g.supplier.toLowerCase().includes(q) ? g.files : (filesHit.length ? filesHit : g.files), show: (brandHit || filesHit.length) && matchPxFilter(g, filter) };
-  }).filter((g) => g.show);
-  const gaps = mon.filter((m) => !groups.has(supplierKey(m.supplier))).filter((m) => {
-    if (filter !== "all" && filter !== "gap") return false;
-    if (!q) return true;
-    return `${m.supplier} ${m.brands.join(" ")}`.toLowerCase().includes(q);
-  });
+}
+
+function fileState(f) {
+  if (f.status === "none" || !f.offers || f.problem) return "bad";
+  if (f.doubt || f.mismatch || (f.quality && f.quality.length)) return "warn";
+  return "good";
+}
+
+function renderCalendar(files, waiting) {
+  const el = $("#dt-calendar");
+  if (!el) return;
+  const dates = [...new Set([...files.map((f) => f.date || "без даты"), ...waiting.map((w) => w.date || "без даты")])]
+    .sort((a, b) => dateKey(a) - dateKey(b)).slice(-21);
+  if (!dates.length) { el.innerHTML = ""; return; }
+  const rows = new Map();
+  const put = (supplier, date, item) => {
+    const key = supplierKey(supplier) || "—";
+    if (!rows.has(key)) rows.set(key, { name: supplier || "—", cells: {} });
+    const cell = rows.get(key).cells[date] || (rows.get(key).cells[date] = { files: 0, bad: 0, warn: 0, wait: 0, offers: 0 });
+    cell.files += 1;
+    if (item === "wait") cell.wait += 1;
+    else {
+      const st = fileState(item);
+      if (st === "bad") cell.bad += 1;
+      if (st === "warn") cell.warn += 1;
+      cell.offers += item.offers || 0;
+    }
+  };
+  files.forEach((f) => put(f.supplier, f.date || "без даты", f));
+  waiting.forEach((w) => put(w.supplier, w.date || "без даты", "wait"));
+  const names = [...rows.values()].sort((a, b) => a.name.localeCompare(b.name, "ru"));
+  const short = (d) => d.length === 10 ? d.slice(0, 5) : d;
+  const head = `<tr><th>Поставщик</th>${dates.map((d) => `<th class="num" title="${esc(d)}">${esc(short(d))}</th>`).join("")}</tr>`;
+  const body = names.map((r) => `<tr><td class="nowrap"><b>${esc(r.name)}</b></td>${dates.map((d) => {
+    const c = r.cells[d];
+    if (!c) return `<td class="cal-cell empty" title="${esc(d)}: файлов нет">·</td>`;
+    const kind = c.bad ? "bad" : c.warn ? "warn" : c.wait === c.files ? "wait" : "good";
+    const tip = `${d}: ${c.files} ${plural(c.files, "файл", "файла", "файлов")}${c.wait ? `, не разобрано ${c.wait}` : ""}${c.bad ? `, с проблемой ${c.bad}` : ""}${c.warn ? `, с замечанием ${c.warn}` : ""}${c.offers ? ` · ${fmtInt(c.offers)} цен` : ""}`;
+    return `<td class="cal-cell ${kind}" data-cal-date="${esc(d)}" data-cal-sup="${esc(r.name)}" title="${esc(tip)}">${c.files}</td>`;
+  }).join("")}</tr>`).join("");
+  const anyWait = waiting.length;
+  el.innerHTML = `<div class="cal-legend"><span><i class="good"></i>распознаны</span><span><i class="warn"></i>есть замечание</span><span><i class="bad"></i>есть проблема</span><span><i class="wait"></i>прошлая дата, ещё не разобрана</span>
+      ${anyWait ? `<button type="button" class="btn small" id="dt-wake">Разобрать прошлые даты · ${fmtInt(anyWait)}</button>` : ""}</div>
+    <div class="table-wrap cal"><table class="mini"><thead>${head}</thead><tbody>${body}</tbody></table></div>`;
+  el.querySelectorAll("[data-cal-date]").forEach((td) => (td.onclick = () => {
+    S.pxDateOpen = { [td.dataset.calDate]: true };
+    S.pxOpen = S.pxOpen || {};
+    S.pxOpen[`${td.dataset.calDate}|${supplierKey(td.dataset.calSup)}`] = true;
+    S.pxQuery = td.dataset.calSup;
+    const search = $("#px-search");
+    if (search) search.value = td.dataset.calSup;
+    renderPriceAudit();
+    const block = document.querySelector(`[data-date-block="${CSS.escape(td.dataset.calDate)}"]`);
+    if (block) block.scrollIntoView({ behavior: "smooth", block: "start" });
+  }));
+  const wake = $("#dt-wake");
+  if (wake) wake.onclick = async () => { await loadAnalytics(); renderPriceAudit(); };
+}
+
+function renderPriceAudit() {
+  const kpis = $("#px-kpis");
+  const list = $("#px-list");
+  if (!kpis || !list) return;
+  renderBrandHints();
+  const filterEl = $("#px-filter");
+  const filter = S.pxFilter || "all";
+  if (filterEl) filterEl.querySelectorAll("button").forEach((b) => b.classList.toggle("on", b.dataset.v === filter));
+  const files = S.priceFiles || [];
+  const waiting = ((S.scan && S.scan.price_waiting) || []).filter((w) => !files.some((f) => f.date === w.date && f.file === w.file));
+  const mon = (S.scan && S.scan.monitoring_suppliers) || [];
+  const monBy = new Map(mon.map((m) => [supplierKey(m.supplier), m]));
+  if (!S.scan) {
+    kpis.innerHTML = "";
+    list.innerHTML = `<div class="card"><div class="empty compact"><h3>Папка ещё не прочитана</h3><p>Нажмите «Обновить данные».</p></div></div>`;
+    return;
+  }
+  renderCalendar(files, waiting);
+  const latest = latestPriceDate(files);
+  const latestFiles = latest ? files.filter((f) => !f.date || f.date === latest) : files;
+  const latestGroups = new Map(priceGroups(latestFiles, monBy).map((g) => [g.key, g]));
   let covered = 0;
   let pairs = 0;
   mon.forEach((m) => {
-    const g = groups.get(supplierKey(m.supplier));
+    const g = latestGroups.get(supplierKey(m.supplier));
     m.brands.forEach((brand) => {
       pairs += 1;
       if (g && g.found.has(brandKey(brand))) covered += 1;
@@ -1208,29 +1258,79 @@ function renderPriceAudit() {
   });
   const badFiles = files.filter(priceBad).length;
   const recognized = files.filter((f) => f.status !== "none" && f.offers > 0).length;
+  const suppliers = new Set(files.map((f) => supplierKey(f.supplier)));
   kpis.innerHTML = [
-    ["Файлов", fmtInt(files.length), "в папке Прайсы"],
-    ["Распознано", fmtInt(recognized), badFiles ? `${fmtInt(badFiles)} с проблемой` : "без проблем"],
-    ["Поставщиков", fmtInt(rows.length), "по папке или имени файла"],
-    ["Цен", fmtInt(files.reduce((s, f) => s + (f.offers || 0), 0)), "строк с артикулом и ценой"],
-    ["Лист 02", pairs ? `${fmtInt(covered)} из ${fmtInt(pairs)}` : "—", "пар поставщик–бренд нашлись"],
-  ].map(([l, v, s]) => `<div class="kpi"><div class="l">${l}</div><div class="v">${v}</div><div class="s">${s}</div></div>`).join("");
-  if (!files.length && !gaps.length) {
+    ["Файлов", fmtInt(files.length + waiting.length), waiting.length ? `${fmtInt(waiting.length)} прошлых дат ещё не разобрано` : "все разобраны"],
+    ["Распознано", fmtInt(recognized), badFiles ? `${fmtInt(badFiles)} с проблемой или замечанием` : "без замечаний"],
+    ["Поставщиков", fmtInt(suppliers.size), "по папке или имени файла"],
+    ["Цен на последнюю дату", fmtInt(latestFiles.reduce((s, f) => s + (f.offers || 0), 0)), latest || "—"],
+    ["Пары поставщик–бренд", pairs ? `${fmtInt(covered)} из ${fmtInt(pairs)}` : "—", "из позиционирования есть в прайсах последней даты"],
+  ].map(([l, v, sub]) => `<div class="kpi"><div class="l">${l}</div><div class="v">${v}</div><div class="s">${esc(sub)}</div></div>`).join("");
+  if (!files.length && !waiting.length) {
     list.innerHTML = `<div class="card"><div class="empty compact"><h3>Прайсов пока нет</h3>
-      <p>Создайте в Данные/Прайсы папку с именем поставщика — как на листе 02 — и положите туда его файлы. Например: Данные/Прайсы/TISS/TissEKB.xls.</p></div></div>`;
+      <p>Создайте в Данные/Прайсы папку-дату, внутри — папку с именем поставщика, как в позиционировании, и положите туда его файлы. Например: Данные/Прайсы/14.10.2026/TISS/TissEKB.xls.</p></div></div>`;
     return;
   }
   if (!S.pxOpen) S.pxOpen = {};
-  const cards = filter === "gap" ? "" : visible.map((g) => pxCard(g)).join("");
-  const gapCard = gaps.length && (filter === "all" || filter === "gap") ? `<div class="card">
+  if (!S.pxDateOpen) S.pxDateOpen = {};
+  const q = String(S.pxQuery || "").trim().toLowerCase();
+  const hitFile = (f) => !q || [f.file, f.id, f.city, f.problem, f.folder, f.name_supplier, f.supplier,
+    ...(f.competitor_brands || []).map((b) => b.brand)].join(" ").toLowerCase().includes(q);
+  const byDate = new Map();
+  files.forEach((f) => {
+    const d = f.date || "без даты";
+    if (!byDate.has(d)) byDate.set(d, []);
+    byDate.get(d).push(f);
+  });
+  const waitBy = new Map();
+  waiting.forEach((w) => {
+    const d = w.date || "без даты";
+    if (!waitBy.has(d)) waitBy.set(d, []);
+    waitBy.get(d).push(w);
+  });
+  const dates = [...new Set([...byDate.keys(), ...waitBy.keys()])].sort((a, b) => dateKey(b) - dateKey(a));
+  const blocks = dates.map((d, n) => {
+    const dayFiles = byDate.get(d) || [];
+    const dayWait = waitBy.get(d) || [];
+    const groups = priceGroups(dayFiles, monBy).map((g) => {
+      const hits = g.files.filter((f) => hitFile(f) || (q && g.supplier.toLowerCase().includes(q)));
+      return { ...g, files: hits.length ? hits : g.files, show: (!q || hits.length || g.brands.some((b) => b.name.toLowerCase().includes(q))) && matchPxFilter(g, filter) };
+    }).filter((g) => g.show);
+    groups.sort((a, b) => a.supplier.localeCompare(b.supplier, "ru"));
+    const waitShown = dayWait.filter((w) => !q || `${w.supplier} ${w.file}`.toLowerCase().includes(q));
+    if (!groups.length && !waitShown.length) return "";
+    const bad = dayFiles.filter(priceBad).length;
+    const open = Object.prototype.hasOwnProperty.call(S.pxDateOpen, d) ? S.pxDateOpen[d] : (n === 0 || (!!q && groups.length > 0));
+    const sup = new Set(dayFiles.map((f) => supplierKey(f.supplier))).size;
+    const head = `<button type="button" class="date-head" data-date="${esc(d)}" data-open="${open ? "1" : "0"}">
+      <span>${open ? "▾" : "▸"}</span><b>${esc(d)}</b>
+      <span class="muted">${fmtInt(dayFiles.length + dayWait.length)} ${plural(dayFiles.length + dayWait.length, "файл", "файла", "файлов")} · ${fmtInt(sup || new Set(dayWait.map((w) => w.supplier)).size)} ${plural(sup, "поставщик", "поставщика", "поставщиков")}${dayFiles.length ? ` · ${fmtInt(dayFiles.reduce((s, f) => s + (f.offers || 0), 0))} цен` : ""}</span>
+      ${bad ? `<span class="pill bad">${fmtInt(bad)} с замечанием</span>` : ""}
+      ${dayWait.length ? `<span class="pill">не разобрано ${fmtInt(dayWait.length)}</span>` : ""}
+      ${d === latest ? `<span class="pill good">для отчётов</span>` : ""}
+    </button>`;
+    const body = open ? `${groups.map((g) => pxCard(g, d)).join("")}
+      ${waitShown.length ? `<div class="card"><div class="muted">Ещё не разобраны (прошлая дата читается, когда нужна динамика): ${waitShown.map((w) => `${esc(w.supplier)} — ${esc(w.file)}`).join(", ")}</div></div>` : ""}` : "";
+    return `<div class="date-block" data-date-block="${esc(d)}">${head}${body}</div>`;
+  }).join("");
+  const present = new Set(files.map((f) => supplierKey(f.supplier)));
+  const gaps = mon.filter((m) => !present.has(supplierKey(m.supplier))).filter((m) => {
+    if (filter !== "all" && filter !== "gap") return false;
+    return !q || `${m.supplier} ${m.brands.join(" ")}`.toLowerCase().includes(q);
+  });
+  const gapCard = gaps.length ? `<div class="card">
     <div class="card-head"><h2>В позиционировании, прайса нет</h2><span class="sub">${fmtInt(gaps.length)}</span></div>
-    <div class="px-brands" style="margin-bottom:10px">Эти поставщики есть на листе 02, папки или файла с их именем программа не увидела.</div>
+    <div class="px-brands" style="margin-bottom:10px">Эти поставщики мониторят бренды по позиционированию, а их папки или файла программа не увидела ни в одной дате.</div>
     ${gaps.map((m) => `<div style="margin-bottom:8px"><b>${esc(m.supplier)}</b>
       <span class="px-brands">${m.brands.map((b) => `<span class="tag miss">${esc(b)}</span>`).join(" ")}</span></div>`).join("")}
   </div>` : "";
-  const emptyFilter = !cards && !gapCard
-    ? `<div class="card"><div class="empty compact"><h3>По этому отбору пусто</h3><p>Смените фильтр или очистите поиск.</p></div></div>` : "";
-  list.innerHTML = cards + gapCard + emptyFilter;
+  const shown = filter === "gap" ? "" : blocks;
+  list.innerHTML = (shown || gapCard) ? shown + gapCard
+    : `<div class="card"><div class="empty compact"><h3>По этому отбору пусто</h3><p>Смените фильтр или очистите поиск.</p></div></div>`;
+  list.querySelectorAll("[data-date]").forEach((b) => (b.onclick = () => {
+    S.pxDateOpen[b.dataset.date] = b.dataset.open !== "1";
+    renderPriceAudit();
+  }));
   list.querySelectorAll("[data-px]").forEach((b) => (b.onclick = () => {
     S.pxOpen[b.dataset.px] = b.dataset.open !== "1";
     renderPriceAudit();
@@ -1255,23 +1355,24 @@ function matchPxFilter(g, filter) {
   return true;
 }
 
-function pxCard(g) {
+function pxCard(g, date) {
+  const key = `${date}|${g.key}`;
   const trouble = g.bad > 0 || g.brands.some((b) => !b.hit);
   const editingHere = !!(S.editWhere === "prices" && S.editing && g.files.some((f) => f.id === S.editing.id));
-  const open = editingHere || (Object.prototype.hasOwnProperty.call(S.pxOpen, g.key) ? S.pxOpen[g.key] : (trouble || g.files.length <= 2));
+  const open = editingHere || (Object.prototype.hasOwnProperty.call(S.pxOpen, key) ? S.pxOpen[key] : trouble);
   const brands = g.brands.length
     ? g.brands.map((b) => `<span class="tag ${b.hit ? "hit" : "miss"}">${esc(b.name)}${b.hit ? ` <b>${fmtInt(b.offers)}</b>` : ""}</span>`).join("")
-    : `<span class="muted">этого поставщика нет на листе 02</span>`;
+    : `<span class="muted">этого поставщика нет в позиционировании</span>`;
   const body = open ? `<div class="table-wrap"><table>
-    <thead><tr><th>Файл</th><th>Город</th><th>Откуда поставщик</th><th>Статус</th><th class="num">Цен</th><th>Бренды в файле</th><th>Замечание</th><th></th></tr></thead>
+    <thead><tr><th>Файл</th><th>Город</th><th>Как читается</th><th>Статус</th><th class="num">Цен</th><th>Бренды в файле</th><th>Замечание</th><th></th></tr></thead>
     <tbody>${g.files.map(pxRow).join("")}</tbody></table></div>${editingHere ? editorHtml() : ""}` : "";
   return `<div class="card px-card">
-    <button type="button" class="px-head" data-px="${esc(g.key)}" data-open="${open ? "1" : "0"}">
+    <button type="button" class="px-head" data-px="${esc(key)}" data-open="${open ? "1" : "0"}">
       <span>${open ? "▾" : "▸"}</span>
       <b>${esc(g.supplier)}</b>
       ${g.monitored ? `<span class="pill good">в мониторинге</span>` : `<span class="pill warn">нет в позиционировании</span>`}
       <span class="muted">${fmtInt(g.files.length)} ${plural(g.files.length, "файл", "файла", "файлов")} · ${fmtInt(g.offers)} цен</span>
-      ${g.bad ? `<span class="pill bad">${fmtInt(g.bad)} с проблемой</span>` : ""}
+      ${g.bad ? `<span class="pill bad">${fmtInt(g.bad)} с замечанием</span>` : ""}
     </button>
     <div class="px-brands">${brands}</div>
     ${body}
@@ -1301,7 +1402,7 @@ function pxRow(f) {
     <td>${esc(from)}${where ? `<div class="muted">${esc(where)}</div>` : ""}</td>
     <td><span class="pill ${kind}">${st}</span></td>
     <td class="num">${fmtInt(f.offers)}</td>
-    <td>${brands || `<span class="muted">${f.offers ? "конкурентов из листа 02 нет" : "—"}</span>`}</td>
+    <td>${brands || `<span class="muted">${f.offers ? "брендов из позиционирования нет" : "—"}</span>`}</td>
     <td>${notes.length ? esc(notes.join(". ")) : "—"}</td>
     <td><button type="button" class="btn small" data-px-edit="${esc(f.id)}">${editing ? "Закрыть" : "Править"}</button></td>
   </tr>`;
@@ -1451,130 +1552,364 @@ function bindEditor(root) {
   };
 }
 
-async function loadDynamics() {
-  const note = $("#px-dyn-note");
-  if (!note || S.dynLoading) return;
-  S.dynLoading = true;
-  note.textContent = "Считаю динамику…";
+// ------------------------------------------------------------------ прайсы: аналитика и графики
+
+const UP = "#b42318";
+const DOWN = "#1d4ed8";
+const SAME_C = "#98a2b3";
+const PALETTE = ["#0f4c5c", "#d97706", "#7c3aed", "#059669", "#db2777", "#2563eb", "#65a30d", "#dc2626", "#0891b2", "#9333ea", "#ca8a04", "#475569"];
+const PRESETS = [["prev", "Предыдущая выгрузка"], ["week", "Неделю назад"], ["month", "Месяц назад"], ["first", "Первая дата"]];
+
+async function loadAnalytics(body = {}) {
+  if (S.paLoading) { S.paAgain = body; return; }
+  S.paLoading = true;
+  const note = $("#pa-note");
+  const slow = !S.analytics || (S.scan && (S.scan.price_waiting || []).length);
+  if (slow) showBoot("Считаю изменения цен");
+  else if (note) note.textContent = "Считаю…";
   try {
-    const body = { folder: S.folder };
-    if (S.dynFrom) body.date_from = S.dynFrom;
-    if (S.dynTo) body.date_to = S.dynTo;
-    S.dynamics = await api("/api/prices/dynamics", body);
-    S.dynFrom = S.dynamics.date_from || "";
-    S.dynTo = S.dynamics.date_to || "";
-    if (S.dynamics.price_files && !S.editing) {
-      // Прайсы прошлых дат читаются только для динамики — теперь их видно и в списке.
-      S.priceFiles = S.dynamics.price_files;
-      if (S.scan) S.scan.price_files = S.dynamics.price_files;
-      renderPriceAudit();
+    const req = { folder: S.folder };
+    const to = body.date_to !== undefined ? body.date_to : (S.analytics && S.analytics.date_to);
+    const from = body.date_from !== undefined ? body.date_from : (S.analytics && S.analytics.date_from);
+    if (to) req.date_to = to;
+    if (from) req.date_from = from;
+    const a = await api("/api/prices/analytics", req);
+    S.analytics = a;
+    if (a.price_files && !S.editing) {
+      // Прошлые даты прочитаны — теперь они есть и в «Данных».
+      S.priceFiles = a.price_files;
+      if (S.scan) { S.scan.price_files = a.price_files; S.scan.price_waiting = []; }
+      if (S.tab === "data") renderPriceAudit();
     }
-    renderDynamics();
+    if (S.pa.brand && !(a.brands || []).some((b) => b.key === S.pa.brand)) { S.pa.brand = ""; S.pa.path = []; }
+    paintAnalytics();
+    if (slow) hideBoot();
   } catch (e) {
-    note.textContent = e.message;
+    if (slow) showBootError(e.message);
+    else toast(e.message, "bad");
   } finally {
-    S.dynLoading = false;
+    S.paLoading = false;
+    if (S.paAgain) { const next = S.paAgain; S.paAgain = null; loadAnalytics(next); }
   }
 }
 
-function renderDynamics() {
-  const d = S.dynamics;
-  if (!d) return;
-  const cache = $("#px-dyn-cache");
-  if (cache) cache.textContent = d.cached ? "из кэша" : "";
-  const note = $("#px-dyn-note");
-  if (!d.dates || d.dates.length < 2) {
-    note.textContent = "Нужны две папки с датами: Данные/Прайсы/12.10.2026/TISS и Данные/Прайсы/13.10.2026/TISS. Файл «валюта» положите прямо в «Прайсы».";
-    $("#px-dyn-body").innerHTML = "";
-  } else if (!d.has_groups) {
-    note.textContent = "Группы берутся из ПСТ: кросс «Да» связывается с категорией, группой и подгруппой нашего артикула. Пока ПСТ нет — показано общее изменение по брендам.";
-  } else {
-    note.textContent = `Только бренды из позиционирования. Артикулов в обеих датах: ${fmtInt(d.compared)}. Цена — медиана. Ниже — как она разошлась с курсом.`;
-  }
-  const options = (d.dates || []).map((dt) => `<option value="${esc(dt)}">${esc(dt)}</option>`).join("");
-  const from = $("#px-dyn-from");
-  const to = $("#px-dyn-to");
-  if (from) { from.innerHTML = options; from.value = d.date_from || ""; }
-  if (to) { to.innerHTML = options; to.value = d.date_to || ""; }
-  const rateText = (r) => r.change == null ? "нет даты" : fmtPct(r.change, true);
-  const rateNums = (r) => (r.old != null && r.new != null)
-    ? `${Number(r.old).toLocaleString("ru-RU", { maximumFractionDigits: 4 })} → ${Number(r.new).toLocaleString("ru-RU", { maximumFractionDigits: 4 })}`
-    : "";
-  $("#px-dyn-rates").innerHTML = (d.rates || []).length
-    ? d.rates.map((r) => `<span class="tag">${esc(r.code)} <b>${rateText(r)}</b> <span class="muted">${rateNums(r)}</span></span>`).join("")
-    : `<span class="muted">Файла «валюта» в папке прайсов нет</span>`;
-  const level = $("#px-dyn-level");
-  if (level) level.querySelectorAll("button").forEach((b) => b.classList.toggle("on", b.dataset.v === (S.dynLevel || "all")));
-  if (d.dates && d.dates.length >= 2) {
-    paintDynSummary();
-    paintDynTable();
-  } else if ($("#px-dyn-summary")) $("#px-dyn-summary").innerHTML = "";
-}
+const signPct = (v, digits = 1) => {
+  if (v == null || Number.isNaN(Number(v))) return "—";
+  const n = Number(v) * 100;
+  const body = Math.abs(n).toLocaleString("ru-RU", { minimumFractionDigits: digits, maximumFractionDigits: digits }) + "%";
+  return n > 0.05 ? `+${body}` : n < -0.05 ? `−${body}` : `0%`;
+};
+const share = (a, b) => (b ? `${Math.round((a / b) * 100)}%` : "—");
+const tint = (v) => {
+  if (v == null) return "transparent";
+  const k = Math.min(1, Math.abs(v) / 0.08);
+  if (Math.abs(v) < 0.0005) return "#f2f4f7";
+  return v > 0 ? `rgba(180,35,24,${0.12 + 0.6 * k})` : `rgba(29,78,216,${0.12 + 0.6 * k})`;
+};
 
-function paintDynSummary() {
-  const d = S.dynamics;
-  const host = $("#px-dyn-summary");
-  if (!d || !host) return;
-  const rows = (d.rows || []).filter((r) => r.brand && !r.category && !r.group && !r.subgroup);
-  rows.sort((a, b) => Math.abs(b.change || 0) - Math.abs(a.change || 0));
-  const rates = (d.rates || []).filter((r) => r.change != null);
-  if (!rows.length) {
-    host.innerHTML = `<div class="muted">В обеих датах нет цен брендов из позиционирования.</div>`;
-    return;
-  }
-  const conclusions = (d.conclusions || []).map((line) => `<div>${esc(line)}</div>`).join("");
-  host.innerHTML = (conclusions ? `<div class="dyn-brand">${conclusions}</div>` : "") + rows.map((r) => {
-    const change = r.change || 0;
-    const dir = change > 0.005 ? "подорожал" : change < -0.005 ? "подешевел" : "почти не изменился";
-    const lines = rates.map((rate) => {
-      const gap = change - rate.change;
-      const word = gap > 0.005 ? "выше курса" : gap < -0.005 ? "ниже курса" : "рядом с курсом";
-      return `${esc(rate.code)} ${fmtPct(rate.change, true)} · цена ${word} ${fmtPp(gap)}`;
-    }).join(" · ");
-    return `<div class="dyn-brand"><div><b>${esc(r.brand)}</b> ${dir} на ${fmtPct(Math.abs(change))} <span class="muted">${fmtInt(r.n)} арт.</span></div><div class="muted">${lines}</div></div>`;
-  }).join("");
-}
-
-function paintDynTable() {
-  const d = S.dynamics;
-  const host = $("#px-dyn-body");
-  if (!d || !host) return;
-  const level = S.dynLevel || "all";
-  const q = (($("#px-dyn-search") && $("#px-dyn-search").value) || "").trim().toLowerCase();
-  const fit = (r) => {
-    if (level === "category") return !r.group && !r.subgroup && !!r.category;
-    if (level === "group") return !!r.group && !r.subgroup;
-    if (level === "subgroup") return !!r.subgroup;
-    return !r.category && !r.group && !r.subgroup;
+function paintAnalytics() {
+  const a = S.analytics;
+  if (!a) return;
+  const note = $("#pa-note");
+  const grid = $("#pa-grid");
+  const dates = a.dates || [];
+  const fill = (el, list, value) => {
+    if (!el) return;
+    el.innerHTML = list.map((d) => `<option value="${esc(d)}">${esc(d)}</option>`).join("");
+    el.value = value || "";
   };
-  const rows = (d.rows || []).filter((r) => fit(r) && (!q || `${r.category} ${r.group} ${r.subgroup} ${r.brand}`.toLowerCase().includes(q)));
-  rows.sort((a, b) => Math.abs(b.change || 0) - Math.abs(a.change || 0));
-  if (!rows.length) {
-    host.innerHTML = `<div class="muted">На этом уровне строк нет.</div>`;
-    return;
+  fill($("#pa-to"), dates, a.date_to);
+  fill($("#pa-from"), dates.filter((d) => dateKey(d) < dateKey(a.date_to)), a.date_from);
+  const preset = $("#pa-preset");
+  if (preset) {
+    const pr = a.presets || {};
+    const current = PRESETS.find(([k]) => pr[k] && pr[k] === a.date_from);
+    preset.innerHTML = PRESETS.map(([k, t]) => `<button type="button" data-v="${k}" ${pr[k] ? "" : "disabled"} title="${pr[k] ? esc(pr[k]) : "дат пока мало"}">${esc(t)}</button>`).join("");
+    preset.querySelectorAll("button").forEach((b) => {
+      b.classList.toggle("on", !!current && current[0] === b.dataset.v);
+      b.onclick = () => { if (pr[b.dataset.v]) loadAnalytics({ date_from: pr[b.dataset.v] }); };
+    });
   }
-  const rates = d.rates || [];
-  const head = rates.map((r) => `<th class="num" title="Цена минус изменение курса">${esc(r.code)}</th>`).join("");
-  const body = rows.slice(0, 300).map((r) => {
-    const name = [r.category, r.group, r.subgroup].filter(Boolean).join(" / ") || "Все";
-    const cells = rates.map((rate) => {
-      if (r.change == null || rate.change == null) return `<td class="num muted">—</td>`;
-      return `<td class="num">${fmtPp(r.change - rate.change)}</td>`;
-    }).join("");
-    return `<tr><td>${esc(name)}</td><td>${esc(r.brand || "все бренды")}</td><td class="num">${fmtInt(r.n)}</td><td class="num">${r.change == null ? "—" : fmtPct(r.change, true)}</td>${cells}</tr>`;
-  }).join("");
-  host.innerHTML = `<div class="table-wrap"><table><thead><tr><th>Срез</th><th>Бренд</th><th class="num">Артикулов</th><th class="num">Цена</th>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
+  const brandSel = $("#pa-brand");
+  if (brandSel) {
+    const list = (a.brands || []).slice().sort((x, y) => x.brand.localeCompare(y.brand, "ru"));
+    brandSel.innerHTML = `<option value="">Все бренды</option>` + list.map((b) => `<option value="${esc(b.key)}">${esc(b.brand)} · ${fmtInt(b.n)}</option>`).join("");
+    brandSel.value = S.pa.brand || "";
+  }
+  const problems = [];
+  if (!a.has_crosses) problems.push("Нет файла кроссов: аналитика берёт только позиции из наших кроссов. Положите «Кроссы свод» в Данные/Кроссы.");
+  if (dates.length < 2) problems.push("Нужны хотя бы две даты выгрузки: Данные/Прайсы/12.10.2026/Поставщик и Данные/Прайсы/13.10.2026/Поставщик.");
+  if (note) note.textContent = problems.length ? problems.join(" ")
+    : `Сравнение ${a.date_from} → ${a.date_to}: только позиции, которые есть в обе даты у того же поставщика и города. Пар «бренд + артикул» в кроссах: ${fmtInt(a.crossed)}.`;
+  if (grid) grid.classList.toggle("hidden", dates.length < 2 || !a.has_crosses);
+  paintKpis(a);
+  if (dates.length < 2 || !a.has_crosses) return;
+  paintIndex(a);
+  paintBrandBars(a);
+  paintDrill(a);
+  paintWhere(a);
+  paintHist(a);
+  paintFeed(a);
+  paintArticles(a);
+  paintCorr(a);
 }
 
-async function writeDynamicsExport() {
-  const btn = $("#px-dyn-export");
+function paintKpis(a) {
+  const el = $("#pa-kpis");
+  if (!el) return;
+  const s = a.summary || {};
+  const rate = Object.entries((a.rates && a.rates.change) || {}).filter(([, v]) => v != null);
+  el.innerHTML = [
+    ["Сравнено позиций", fmtInt(s.n), `${fmtInt(s.places || 0)} пар поставщик + город · ${fmtInt(s.brands || 0)} брендов`],
+    ["Подорожали", `<span style="color:${UP}">${fmtInt(s.up)}</span>`, share(s.up, s.n)],
+    ["Подешевели", `<span style="color:${DOWN}">${fmtInt(s.down)}</span>`, share(s.down, s.n)],
+    ["Без изменений", fmtInt(s.same), share(s.same, s.n)],
+    ["Медиана изменения", signPct(s.median), `среднее ${signPct(s.mean)}`],
+    ["Пропали / новые", `${fmtInt(s.gone)} / ${fmtInt(s.new)}`, "у тех же поставщика и города"],
+    ["Курс", rate.length ? rate.map(([c, v]) => `${esc(c)} ${signPct(v)}`).join("<br>") : "—", rate.length ? "за тот же период" : "файла «валюта» нет"],
+  ].map(([l, v, sub]) => `<div class="kpi"><div class="l">${l}</div><div class="v">${v}</div><div class="s">${esc(sub)}</div></div>`).join("");
+}
+
+function lineChart(labels, series, opts = {}) {
+  const W = 900;
+  const H = opts.height || 280;
+  const pad = { l: 46, r: 46, t: 14, b: 30 };
+  const shown = series.filter((x) => !x.hidden && x.values.some((v) => v != null));
+  const left = shown.filter((x) => !x.right);
+  const right = shown.filter((x) => x.right);
+  const range = (list) => {
+    const vals = list.flatMap((x) => x.values.filter((v) => v != null));
+    if (!vals.length) return [99, 101];
+    let lo = Math.min(...vals);
+    let hi = Math.max(...vals);
+    if (hi - lo < 1) { lo -= 0.5; hi += 0.5; }
+    const m = (hi - lo) * 0.08;
+    return [lo - m, hi + m];
+  };
+  const [l0, l1] = range(left);
+  const [r0, r1] = range(right);
+  const n = labels.length;
+  const x = (i) => pad.l + (n <= 1 ? 0 : (i * (W - pad.l - pad.r)) / (n - 1));
+  const y = (v, lo, hi) => pad.t + (1 - (v - lo) / (hi - lo)) * (H - pad.t - pad.b);
+  const ticks = (lo, hi) => {
+    const out = [];
+    const step = (hi - lo) / 4;
+    for (let k = 0; k <= 4; k += 1) out.push(lo + step * k);
+    return out;
+  };
+  const grid = ticks(l0, l1).map((v) => `<line x1="${pad.l}" x2="${W - pad.r}" y1="${y(v, l0, l1)}" y2="${y(v, l0, l1)}" class="ch-grid"/>
+    <text x="${pad.l - 6}" y="${y(v, l0, l1) + 4}" class="ch-tick" text-anchor="end">${v.toLocaleString("ru-RU", { maximumFractionDigits: 1 })}</text>`).join("");
+  const rticks = right.length ? ticks(r0, r1).map((v) => `<text x="${W - pad.r + 6}" y="${y(v, r0, r1) + 4}" class="ch-tick">${v.toLocaleString("ru-RU", { maximumFractionDigits: 1 })}</text>`).join("") : "";
+  const every = Math.max(1, Math.ceil(n / 12));
+  const xl = labels.map((t, i) => (i % every === 0 || i === n - 1) ? `<text x="${x(i)}" y="${H - 8}" class="ch-tick" text-anchor="middle">${esc(String(t).slice(0, 5))}</text>` : "").join("");
+  const base = left.length && l0 < 100 && l1 > 100 && opts.base100 ? `<line x1="${pad.l}" x2="${W - pad.r}" y1="${y(100, l0, l1)}" y2="${y(100, l0, l1)}" class="ch-base"/>` : "";
+  const lines = shown.map((sr) => {
+    const [lo, hi] = sr.right ? [r0, r1] : [l0, l1];
+    let d = "";
+    let pen = false;
+    sr.values.forEach((v, i) => {
+      if (v == null) { pen = false; return; }
+      d += `${pen ? "L" : "M"}${x(i).toFixed(1)},${y(v, lo, hi).toFixed(1)}`;
+      pen = true;
+    });
+    const dots = sr.values.map((v, i) => v == null ? "" : `<circle cx="${x(i)}" cy="${y(v, lo, hi)}" r="${n > 30 ? 2 : 3.2}" fill="${sr.color}"><title>${esc(sr.name)} · ${esc(labels[i])}: ${v.toLocaleString("ru-RU", { maximumFractionDigits: 2 })}${sr.unit || ""}</title></circle>`).join("");
+    return `<path d="${d}" fill="none" stroke="${sr.color}" stroke-width="${sr.width || 2}" ${sr.dash ? `stroke-dasharray="6 4"` : ""}/>${dots}`;
+  }).join("");
+  return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img">${grid}${rticks}${base}${xl}${lines}</svg>`;
+}
+
+function paintIndex(a) {
+  const el = $("#pa-index");
+  if (!el) return;
+  const idx = a.index || {};
+  const lines = idx.lines || {};
+  const keys = Object.keys(lines).filter((k) => k);
+  keys.sort((p, q) => (idx.labels[p] || p).localeCompare(idx.labels[q] || q, "ru"));
+  const focus = S.pa.brand;
+  const series = [{ key: "", name: "Все бренды", values: lines[""] || [], color: "#17212b", width: 3 }];
+  keys.forEach((k, i) => series.push({ key: k, name: idx.labels[k] || k, values: lines[k], color: PALETTE[i % PALETTE.length], width: focus === k ? 3.5 : 1.8 }));
+  const rates = (a.rates && a.rates.index) || {};
+  Object.keys(rates).forEach((code, i) => series.push({ key: `rate:${code}`, name: `Курс ${code}`, values: rates[code], color: ["#94a3b8", "#a16207", "#be185d", "#0e7490"][i % 4], dash: true, width: 1.6 }));
+  series.forEach((sr) => {
+    sr.hidden = S.pa.hidden[sr.key] === true || (focus && sr.key && !sr.key.startsWith("rate:") && sr.key !== focus && S.pa.hidden[sr.key] !== false);
+  });
+  const legend = series.map((sr) => `<button type="button" class="lg ${sr.hidden ? "off" : ""}" data-lg="${esc(sr.key)}"><i style="background:${sr.color}${sr.dash ? ";height:2px" : ""}"></i>${esc(sr.name)}</button>`).join("");
+  el.innerHTML = `${lineChart(idx.dates || [], series, { base100: true })}<div class="ch-legend">${legend}</div>
+    <div class="muted small-text">Нажмите на бренд в легенде — линия скроется или появится. Индекс: от даты к дате медиана изменения по позициям, которые есть в обе даты, затем перемножение.</div>`;
+  el.querySelectorAll("[data-lg]").forEach((b) => (b.onclick = () => {
+    const k = b.dataset.lg;
+    const sr = series.find((x) => x.key === k);
+    S.pa.hidden[k] = !(sr && sr.hidden) ? true : false;
+    paintIndex(a);
+  }));
+}
+
+function paintBrandBars(a) {
+  const el = $("#pa-brands");
+  if (!el) return;
+  const rows = (a.brands || []).slice();
+  if (!rows.length) { el.innerHTML = `<div class="muted">Общих позиций в эти даты нет.</div>`; return; }
+  el.innerHTML = `<div class="dv-head"><span style="color:${DOWN}">← подешевели</span><span style="color:${UP}">подорожали →</span></div>` + rows.map((r) => {
+    const down = r.n ? (r.down / r.n) * 50 : 0;
+    const up = r.n ? (r.up / r.n) * 50 : 0;
+    return `<button type="button" class="dv-row ${S.pa.brand === r.key ? "on" : ""}" data-brand="${esc(r.key)}" title="${esc(`${r.brand}: вверх ${r.up}, вниз ${r.down}, без изменений ${r.same} из ${r.n}. Пропало ${r.gone}, новых ${r.new}`)}">
+      <span class="dv-name">${esc(r.brand)}</span>
+      <span class="dv-bar"><i class="dn" style="width:${down}%;right:50%"></i><i class="up" style="width:${up}%;left:50%"></i><em></em></span>
+      <span class="dv-num"><b style="color:${(r.median || 0) > 0.0005 ? UP : (r.median || 0) < -0.0005 ? DOWN : "inherit"}">${signPct(r.median)}</b> <span class="muted">${fmtInt(r.n)} поз.</span></span>
+    </button>`;
+  }).join("");
+  el.querySelectorAll("[data-brand]").forEach((b) => (b.onclick = () => {
+    S.pa.brand = S.pa.brand === b.dataset.brand ? "" : b.dataset.brand;
+    S.pa.path = [];
+    paintAnalytics();
+  }));
+}
+
+function placeRows(a, brand, path) {
+  const rows = (a.places || []).filter((p) => p.key === brand);
+  const [cat, group] = path;
+  if (!cat) return rows.filter((p) => !p.group);
+  if (!group) return rows.filter((p) => p.category === cat && p.group && !p.subgroup);
+  return rows.filter((p) => p.category === cat && p.group === group && p.subgroup);
+}
+
+function paintDrill(a) {
+  const el = $("#pa-drill");
+  const sub = $("#pa-drill-sub");
+  if (!el) return;
+  const brand = S.pa.brand || ((a.brands || [])[0] || {}).key;
+  if (!brand) { el.innerHTML = `<div class="muted">Нет данных.</div>`; return; }
+  const name = ((a.brands || []).find((b) => b.key === brand) || {}).brand || brand;
+  const path = S.pa.path || [];
+  const rows = placeRows(a, brand, path).sort((x, y) => Math.abs(y.median || 0) * Math.sqrt(y.n) - Math.abs(x.median || 0) * Math.sqrt(x.n));
+  if (sub) sub.textContent = S.pa.brand ? name : `${name} — больше всего изменений; выберите бренд слева`;
+  const crumbs = [`<button type="button" class="crumb" data-crumb="0">${esc(name)}</button>`,
+    ...path.map((p, i) => `<button type="button" class="crumb" data-crumb="${i + 1}">${esc(p)}</button>`)].join(" › ");
+  const max = Math.max(0.01, ...rows.map((r) => Math.abs(r.median || 0)));
+  const deeper = path.length < 2;
+  const body = rows.length ? rows.map((r) => {
+    const label = path.length === 0 ? r.category : path.length === 1 ? r.group : r.subgroup;
+    const w = (Math.abs(r.median || 0) / max) * 48;
+    const side = (r.median || 0) >= 0 ? `left:50%;width:${w}%;background:${UP}` : `right:50%;width:${w}%;background:${DOWN}`;
+    return `<button type="button" class="dr-row" data-place="${esc(label)}" ${deeper ? "" : "data-leaf=1"}>
+      <span class="dr-name">${esc(label || "—")}</span>
+      <span class="dr-bar"><i style="${side}"></i><em></em></span>
+      <span class="dr-num"><b>${signPct(r.median)}</b> <span class="muted">↑${fmtInt(r.up)} ↓${fmtInt(r.down)} из ${fmtInt(r.n)}</span></span>
+    </button>`;
+  }).join("") : `<div class="muted">Позиции этого бренда не привязаны к нашим группам: нет кроссов «Да» к товарам ПСТ.</div>`;
+  el.innerHTML = `<div class="crumbs">${crumbs}</div>${body}`;
+  el.querySelectorAll("[data-crumb]").forEach((b) => (b.onclick = () => {
+    S.pa.brand = brand;
+    S.pa.path = path.slice(0, Number(b.dataset.crumb));
+    paintDrill(a); paintArticles(a);
+  }));
+  el.querySelectorAll("[data-place]").forEach((b) => (b.onclick = () => {
+    S.pa.brand = brand;
+    if (b.dataset.leaf) S.pa.path = [...path.slice(0, 2), b.dataset.place];
+    else S.pa.path = [...path, b.dataset.place];
+    if (S.pa.path.length > 2 && !b.dataset.leaf) S.pa.path = S.pa.path.slice(0, 2);
+    paintDrill(a); paintArticles(a);
+  }));
+}
+
+function paintWhere(a) {
+  const el = $("#pa-where");
+  if (!el) return;
+  const brand = S.pa.brand || "";
+  const rows = (a.where || []).filter((w) => w.key === brand);
+  if (!rows.length) { el.innerHTML = `<div class="muted">Нет общих позиций.</div>`; return; }
+  const cities = [...new Set(rows.map((r) => r.city))].sort((x, y) => x.localeCompare(y, "ru"));
+  const sups = [...new Set(rows.map((r) => r.supplier))].sort((x, y) => x.localeCompare(y, "ru"));
+  const at = new Map(rows.map((r) => [`${r.supplier}|${r.city}`, r]));
+  const head = `<tr><th></th>${cities.map((c) => `<th class="hm-city">${esc(c === "—" ? "город не указан" : c)}</th>`).join("")}</tr>`;
+  const body = sups.map((sup) => `<tr><td class="nowrap"><b>${esc(sup)}</b></td>${cities.map((c) => {
+    const r = at.get(`${sup}|${c}`);
+    if (!r) return `<td class="hm-cell none"></td>`;
+    const dark = Math.abs(r.median || 0) > 0.05;
+    return `<td class="hm-cell" style="background:${tint(r.median)};${dark ? "color:#fff" : ""}" title="${esc(`${sup} · ${c}: медиана ${signPct(r.median)}, вверх ${r.up}, вниз ${r.down}, без изменений ${r.same} из ${r.n}`)}">${signPct(r.median)}<small>${fmtInt(r.n)}</small></td>`;
+  }).join("")}</tr>`).join("");
+  el.innerHTML = `<div class="table-wrap"><table class="heat">${head}${body}</table></div>
+    <div class="muted small-text">${brand ? esc(((a.brands || []).find((b) => b.key === brand) || {}).brand || brand) : "Все бренды"}. Цвет — медиана: красный — подорожало, синий — подешевело. Мелкая цифра — позиций.</div>`;
+}
+
+function paintHist(a) {
+  const el = $("#pa-hist");
+  if (!el) return;
+  const labels = (a.hist && a.hist.labels) || [];
+  const values = ((a.hist && a.hist.values) || {})[S.pa.brand || ""] || labels.map(() => 0);
+  const W = 520;
+  const H = 220;
+  const max = Math.max(1, ...values);
+  const bw = (W - 20) / labels.length;
+  const mid = Math.floor(labels.length / 2);
+  const bars = values.map((v, i) => {
+    const h = (v / max) * (H - 60);
+    const color = i < mid ? DOWN : i > mid ? UP : SAME_C;
+    const xx = 10 + i * bw;
+    return `<rect x="${xx + 4}" y="${H - 40 - h}" width="${bw - 8}" height="${h}" fill="${color}" opacity="${i === mid ? 0.6 : 0.85}"><title>${esc(labels[i])}: ${v}</title></rect>
+      <text x="${xx + bw / 2}" y="${H - 44 - h}" class="ch-tick" text-anchor="middle">${v ? fmtInt(v) : ""}</text>
+      <text x="${xx + bw / 2}" y="${H - 22}" class="ch-tick" text-anchor="middle">${esc(labels[i].replace("без изменений", "0"))}</text>`;
+  }).join("");
+  el.innerHTML = `<svg class="chart" viewBox="0 0 ${W} ${H}">${bars}</svg>`;
+}
+
+function paintFeed(a) {
+  const el = $("#pa-feed");
+  if (!el) return;
+  const rows = (a.feed || []).filter((r) => !S.pa.brand || r.key === S.pa.brand).slice(0, 24);
+  el.innerHTML = rows.length ? `<div class="feed">${rows.map((r) => {
+    const dir = (r.median || 0) > 0.0005 ? "up" : (r.median || 0) < -0.0005 ? "down" : "mix";
+    const word = dir === "up" ? "подняли" : dir === "down" ? "снизили" : "двигали в обе стороны";
+    return `<div class="feed-row ${dir}"><b>${esc(r.brand)}</b> · ${esc(r.supplier)}${r.city && r.city !== "—" ? ` · ${esc(r.city)}` : ""} — ${word}: ${fmtInt(r.up + r.down)} из ${fmtInt(r.n)} позиций,
+      медиана ${signPct(r.median)}, среднее ${signPct(r.mean)}</div>`;
+  }).join("")}</div>` : `<div class="muted">Заметных сдвигов нет: меньше 10% позиций поменяли цену.</div>`;
+}
+
+function paintArticles(a) {
+  const el = $("#pa-articles");
+  const sub = $("#pa-articles-sub");
+  if (!el) return;
+  const brand = S.pa.brand || ((a.brands || [])[0] || {}).key;
+  const [cat, group, subgroup] = S.pa.path || [];
+  let rows = ((a.articles || {})[brand] || []).filter((r) => (!cat || (r.category || "Без категории") === cat) && (!group || r.group === group) && (!subgroup || r.subgroup === subgroup));
+  const name = ((a.brands || []).find((b) => b.key === brand) || {}).brand || brand || "";
+  if (sub) sub.textContent = `${name}${cat ? ` · ${[cat, group, subgroup].filter(Boolean).join(" › ")}` : ""} · самые большие изменения`;
+  rows = rows.slice(0, 60);
+  el.innerHTML = rows.length ? `<div class="table-wrap scroll"><table class="mini"><thead><tr><th>Артикул</th><th>Поставщик</th><th>Город</th><th class="num">Было</th><th class="num">Стало</th><th class="num">Изм.</th><th>Подгруппа</th></tr></thead><tbody>
+    ${rows.map((r) => `<tr><td class="nowrap"><b>${esc(r.article)}</b></td><td>${esc(r.supplier)}</td><td>${esc(r.city === "—" ? "" : r.city)}</td>
+      <td class="num">${fmtMoney(r.old)}</td><td class="num">${fmtMoney(r.new)}</td>
+      <td class="num" style="color:${r.change > 0 ? UP : DOWN}"><b>${signPct(r.change)}</b></td><td class="muted">${esc(r.subgroup || r.group || "")}</td></tr>`).join("")}
+  </tbody></table></div>` : `<div class="muted">Изменений цен нет.</div>`;
+}
+
+function paintCorr(a) {
+  const el = $("#pa-corr");
+  if (!el) return;
+  const rows = (a.corr || []).filter((r) => !S.pa.brand || r.key === S.pa.brand);
+  const codes = (a.rates && a.rates.codes) || [];
+  if (!codes.length) { el.innerHTML = `<div class="muted">Файла «валюта» нет: положите его прямо в Данные/Прайсы — в шапке даты, в строках USD, EUR, JPY, CNY.</div>`; return; }
+  if (a.corr_note || !rows.length) {
+    el.innerHTML = `<div class="muted">${esc(a.corr_note || "Мало общих шагов цены и курса.")} Пока видно только направление: сравните пунктир курса с линиями брендов на графике индекса.</div>`;
+    return;
+  }
+  const word = (r) => Math.abs(r) >= 0.7 ? "сильная" : Math.abs(r) >= 0.4 ? "заметная" : "слабая";
+  el.innerHTML = `<div class="table-wrap"><table class="mini"><thead><tr><th>Бренд</th><th>Валюта</th><th class="num">Связь</th><th>Как читать</th></tr></thead><tbody>
+    ${rows.sort((x, y) => Math.abs(y.r) - Math.abs(x.r)).slice(0, 40).map((r) => `<tr><td><b>${esc(r.brand)}</b></td><td>${esc(r.code)}</td>
+      <td class="num">${r.r.toLocaleString("ru-RU", { maximumFractionDigits: 2 })}</td>
+      <td class="muted">${word(r.r)} ${r.r > 0 ? "прямая" : "обратная"} связь${r.lag ? `, цена идёт за курсом через ${r.lag} ${plural(r.lag, "дату", "даты", "дат")}` : ", в ту же дату"} · шагов ${r.n}</td></tr>`).join("")}
+  </tbody></table></div>`;
+}
+
+async function writePriceExport() {
+  const btn = $("#pa-export");
   if (btn) btn.disabled = true;
-  showBoot();
+  showBoot("Пишу выгрузку цен");
   try {
-    const r = await api("/api/prices/dynamics-export", { folder: S.folder, date_from: S.dynFrom, date_to: S.dynTo });
+    const r = await api("/api/prices/export", { folder: S.folder });
     S.pxFolder = r.folder;
     hideBoot();
-    toast(`Записан ${r.name}: ${fmtInt(r.rows)} строк по артикулам`, "good");
+    toast(`Записан ${r.name}: ${fmtInt(r.rows)} строк, ${fmtInt(r.dates)} ${plural(r.dates, "дата", "даты", "дат")}, ${fmtInt(r.files)} файлов`, "good");
+    api("/api/open", { path: r.path }).catch(() => {});
   } catch (e) {
     showBootError(e.message);
   } finally {
@@ -1915,7 +2250,7 @@ function renderCoverage() {
     ${screened ? `<div class="muted" style="font-size:12.5px; margin-bottom:8px">Отсеяно пар: ${screened}. Список — в выгрузке дыр, лист «Несопоставимо».</div>` : ""}
     <div class="table-wrap"><table class="mini"><thead><tr>
       <th>Конкурент</th><th class="num">Товаров</th><th class="num">Кросс «Да»</th><th class="num">Есть в прайсах</th>
-      <th class="num">У поставщиков листа 02</th><th class="num">Отсеяно</th><th class="num">С ценой</th><th class="num">Доля продаж с ценой</th>
+      <th class="num">У поставщиков позиционирования</th><th class="num">Отсеяно</th><th class="num">С ценой</th><th class="num">Доля продаж с ценой</th>
       <th class="num">Один поставщик</th><th class="num">Второй дороже на</th><th>Кто чаще даёт минимум</th>
     </tr></thead><tbody>${rows}</tbody></table></div>
     ${actions ? `<ul class="conclusions">${actions}</ul>` : ""}
@@ -1960,39 +2295,81 @@ function renderBrandHints() {
   if (!el) return;
   const hints = (S.scan && S.scan.brand_hints) || [];
   const aliases = (S.scan && S.scan.brand_aliases) || [];
-  if (!hints.length && !aliases.length) {
+  const ignored = (S.scan && S.scan.brand_ignore) || [];
+  if (!hints.length && !aliases.length && !ignored.length) {
     el.classList.add("hidden");
     el.innerHTML = "";
     return;
   }
+  if (!S.hintPick) S.hintPick = {};
   el.classList.remove("hidden");
+  const picked = hints.filter((h) => S.hintPick[h.brand]);
   el.innerHTML = `
     <div class="card-head"><h2>Написание брендов</h2>
-      <span class="sub">Бренд в прайсе или в кроссах похож на конкурента, но не совпал. «Считать как» — и его цены пойдут в сравнение</span></div>
-    ${hints.length ? `<div class="table-wrap"><table class="mini"><thead><tr>
-      <th>Как написано</th><th class="num">Строк</th><th>Где</th><th>Похож на</th><th></th></tr></thead><tbody>
-      ${hints.map((h, i) => `<tr><td><b>${esc(h.brand)}</b></td><td class="num">${fmtInt(h.rows)}</td>
+      <span class="sub">Бренд в прайсе или кроссах похож на конкурента, но не совпал. «Считать как» — и его цены пойдут в сравнение. «Не тот бренд» — подсказка больше не появится</span></div>
+    ${hints.length ? `<div class="row tight" style="margin-bottom:8px; flex-wrap:wrap">
+        <label class="check"><input type="checkbox" id="hint-all" ${picked.length === hints.length ? "checked" : ""}> выбрать все · ${fmtInt(hints.length)}</label>
+        <button type="button" class="btn small primary" id="hint-apply" ${picked.length ? "" : "disabled"}>Считать как конкурента · ${fmtInt(picked.length)}</button>
+        <button type="button" class="btn small" id="hint-ignore" ${picked.length ? "" : "disabled"}>Не тот бренд · ${fmtInt(picked.length)}</button>
+      </div>
+      <div class="table-wrap"><table class="mini"><thead><tr>
+      <th></th><th>Как написано</th><th class="num">Строк</th><th>Где</th><th>Похож на</th><th></th></tr></thead><tbody>
+      ${hints.map((h, i) => `<tr><td><input type="checkbox" data-pick="${i}" ${S.hintPick[h.brand] ? "checked" : ""}></td>
+        <td><b>${esc(h.brand)}</b></td><td class="num">${fmtInt(h.rows)}</td>
         <td class="muted">${esc((h.where || []).join(", "))}</td><td>${esc(h.suggest)}</td>
-        <td><button type="button" class="btn small" data-alias="${i}">Считать как ${esc(h.suggest)}</button></td></tr>`).join("")}
+        <td class="nowrap"><button type="button" class="btn small" data-alias="${i}">Считать как ${esc(h.suggest)}</button>
+          <button type="button" class="btn small ghost" data-ignore="${i}">Не тот бренд</button></td></tr>`).join("")}
     </tbody></table></div>` : `<div class="muted">Похожих несовпавших брендов нет.</div>`}
-    ${aliases.length ? `<div class="px-brands" style="margin-top:10px">Уже заданы:
+    ${aliases.length ? `<div class="px-brands" style="margin-top:10px">Считаются как конкурент:
       ${aliases.map((x) => `<span class="tag hit">${esc(x[0])} → ${esc(x[1])}
-        <button type="button" class="btn small ghost" data-unalias="${esc(x[0])}">убрать</button></span>`).join(" ")}</div>` : ""}`;
+        <button type="button" class="btn small ghost" data-unalias="${esc(x[0])}">убрать</button></span>`).join(" ")}</div>` : ""}
+    ${ignored.length ? `<details style="margin-top:10px"><summary class="muted">Отклонённые подсказки · ${fmtInt(ignored.length)}</summary>
+      <div class="px-brands" style="margin-top:6px">${ignored.map((b) => `<span class="tag">${esc(b)}
+        <button type="button" class="btn small ghost" data-unignore="${esc(b)}">вернуть</button></span>`).join(" ")}</div></details>` : ""}`;
+  el.querySelectorAll("[data-pick]").forEach((cb) => (cb.onchange = () => {
+    const h = hints[Number(cb.dataset.pick)];
+    if (h) S.hintPick[h.brand] = cb.checked;
+    renderBrandHints();
+  }));
+  const all = $("#hint-all");
+  if (all) all.onchange = () => { hints.forEach((h) => (S.hintPick[h.brand] = all.checked)); renderBrandHints(); };
+  const apply = $("#hint-apply");
+  if (apply) apply.onclick = () => saveAlias({ add_many: picked.map((h) => [h.brand, h.suggest]) });
+  const ignore = $("#hint-ignore");
+  if (ignore) ignore.onclick = () => saveAlias({ ignore_many: picked.map((h) => h.brand) });
   el.querySelectorAll("[data-alias]").forEach((b) => (b.onclick = () => {
     const h = hints[Number(b.dataset.alias)];
     if (h) saveAlias({ add: [h.brand, h.suggest] });
   }));
+  el.querySelectorAll("[data-ignore]").forEach((b) => (b.onclick = () => {
+    const h = hints[Number(b.dataset.ignore)];
+    if (h) saveAlias({ ignore: h.brand });
+  }));
   el.querySelectorAll("[data-unalias]").forEach((b) => (b.onclick = () => saveAlias({ remove: b.dataset.unalias })));
+  el.querySelectorAll("[data-unignore]").forEach((b) => (b.onclick = () => saveAlias({ unignore: b.dataset.unignore })));
 }
 
 async function saveAlias(body) {
+  let r;
   try {
-    await api("/api/brand-aliases", body);
+    r = await api("/api/brand-aliases", body);
   } catch (e) {
     toast(e.message, "bad");
     return;
   }
-  toast("Сохранено — перечитываю прайсы", "good");
+  S.hintPick = {};
+  if (!r.reread) {
+    // «Не тот бренд» не меняет цены — прайсы не перечитываем.
+    if (S.scan) {
+      S.scan.brand_ignore = r.brand_ignore;
+      const gone = new Set((r.brand_ignore || []).map((b) => brandKey(b)));
+      S.scan.brand_hints = (S.scan.brand_hints || []).filter((h) => !gone.has(brandKey(h.brand)));
+    }
+    renderBrandHints();
+    toast("Подсказка убрана", "good");
+    return;
+  }
+  toast(r.added > 1 ? `Сохранено синонимов: ${r.added} — перечитываю прайсы` : "Сохранено — перечитываю прайсы", "good");
   if (await rescan(false)) analyze();
 }
 
@@ -2136,7 +2513,7 @@ async function build() {
     const r = await api("/api/build", { folder: S.folder, options: recPayload() });
     $("#result").innerHTML = `<div class="result">
       <div><div class="t">Готово: ${esc(r.name)}</div>
-      <div class="muted" style="font-size:13px">${esc(r.kind === "quick" ? "Быстрый" : "Полный")} отчёт · ${fmtInt(r.rows)} товаров, ${fmtInt(r.priced)} с ценой конкурента, исключено ${fmtInt(r.excluded)} · листы: ${r.sheets.map(esc).join(", ")}</div>
+      <div class="muted" style="font-size:13px">${fmtInt(r.rows)} товаров, ${fmtInt(r.priced)} с ценой конкурента, исключено ${fmtInt(r.excluded)} · листы: ${r.sheets.map(esc).join(", ")}</div>
       ${r.brief ? `<div class="muted" style="font-size:13px">Разбор группы: ${esc(r.brief)}</div>` : ""}</div>
       <div class="spacer" style="flex:1"></div>
       <button class="btn primary" data-open="${esc(r.path)}">Открыть файл</button>
@@ -2177,7 +2554,7 @@ async function buildAll() {
     $("#result").innerHTML = `<div class="result">
       <div>
         <div class="t">${n ? `Готово: ${fmtInt(n)} ${plural(n, "файл", "файла", "файлов")}` : "Файлы не созданы"}</div>
-        <div class="muted" style="font-size:13px">Файлы Excel — только группы с полным набором: ПСТ, СБС, Продажи и АЦПКД. В разборе — каждая группа из списка слева, даже если файл не создан. Вид — ${esc(S.opts.report_kind === "quick" ? "быстрый" : "полный")}.</div>
+        <div class="muted" style="font-size:13px">Файлы Excel — только группы с полным набором: ПСТ, СБС, Продажи и АЦПКД. В разборе — каждая группа из списка слева, даже если файл не создан.</div>
         ${r.brief ? `<div class="muted" style="font-size:13px">Текстовый разбор: ${esc(r.brief)}</div>` : ""}
         ${(r.missing_rates || []).length ? `<div class="note">Не хватает курсов, из‑за этого часть цен пустая: ${(r.missing_rates || []).map((m) => `<b>${esc(m.currency)}</b> (${fmtInt(m.items)})`).join(", ")}. <button class="btn small ghost" id="goto-rates-batch">Задать курсы</button></div>` : ""}
         ${made}
@@ -2255,7 +2632,7 @@ function renderStockForm() {
   });
   const p = stockProfile();
   if (!p) return;
-  seg($("#sk-kind"), p.report_kind === "quick" ? "quick" : "full", (v) => { p.report_kind = v; persistStock(); });
+  p.report_kind = "full";
   seg($("#sk-money"), p.money_base === "potential" ? "potential" : "sales", (v) => { p.money_base = v; persistStock(); });
   const enabled = $("#sk-rec-enabled");
   enabled.checked = !!p.rec.enabled;
@@ -2325,7 +2702,8 @@ function renderStockForm() {
   stocked.onchange = () => { p.in_stock_only = stocked.checked; persistStock(); };
   const fieldChoices = S.init.sources || {};
   const fields = S.init.fields || {};
-  const fallback = p.base === "acp" ? "acp_own" : "own_acp";
+  p.base = "pst";
+  const fallback = "own_acp";
   $("#sk-sources").innerHTML = Object.entries(fields).map(([k, def]) => {
     const cur = p.sources[k] || fallback;
     return `<div class="src-row">

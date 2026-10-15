@@ -176,7 +176,7 @@ def funnel(src, rows, analysis: list[dict], index, any_index, price_files, posit
                 actions.append(f"У {_of_items(yes - in_prices)} кросс «Да» есть, но этих артикулов нет ни в одном прайсе.")
             if in_prices - monitored > 0:
                 names = ", ".join(s for s, _ in outside.most_common(3))
-                actions.append(f"У {_of_items(in_prices - monitored)} цена есть только у поставщиков не из листа 02 ({names}).")
+                actions.append(f"У {_of_items(in_prices - monitored)} цена есть только у поставщиков не из позиционирования ({names}).")
             if n - yes > 0:
                 actions.append(f"Без кросса «Да» ещё {_items(n - yes)}.")
         if excluded:
@@ -284,7 +284,7 @@ def gaps_workbook(path: Path, src, rows, comps: list, index, any_index, position
             for c in yes:
                 anywhere = any_index.get(key, c.cross_key)
                 if anywhere:
-                    where = "цена есть только вне листа 02: " + ", ".join(sorted({o.supplier for o in anywhere})[:3])
+                    where = "цена есть только у поставщиков вне позиционирования: " + ", ".join(sorted({o.supplier for o in anywhere})[:3])
                 elif missing:
                     where = "нет прайса " + ", ".join(missing)
                 else:

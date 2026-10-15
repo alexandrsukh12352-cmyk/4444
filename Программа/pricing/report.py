@@ -65,7 +65,7 @@ CROSS_SPLITS = {
     "subgroup_abc": "Подгруппы и ABC",
 }
 PRICE_SOURCES = {"acp": "АЦПКД", "prices": "Прайсы", "both": "АЦПКД и прайсы"}
-REPORT_KINDS = {"full": "Полный", "quick": "Быстрый"}
+REPORT_KINDS = {"full": "Полный"}  # быстрого отчёта больше нет
 SUBGROUP_MODES = {"sheets": "Лист на подгруппу", "single": "Все на одном листе"}
 
 FILTERS = {
@@ -179,7 +179,7 @@ class Options:
     in_stock_only: bool = False
     subgroup_mode: str = "sheets"
     suggest_threshold: float = 0.3
-    report_kind: str = "full"  # full | quick
+    report_kind: str = "full"  # единственный вид; старое «quick» в настройках читается как полный
     rec: dict = field(default_factory=dict)
     green_when: str = "above"  # above — зелёный, когда мы дороже цели; below — когда дешевле
     money_base: str = "sales"  # sales — сумма с продаж; potential — с потенциала (остаток + в пути)
@@ -196,6 +196,8 @@ class Options:
             opt.price_source = "both"
         if opt.report_kind not in REPORT_KINDS:
             opt.report_kind = "full"
+        # Отчёт строится только от ПСТ: вариант «АЦПКД + столбцы из ПСТ» убран.
+        opt.base = "pst"
         if opt.subgroup_mode not in SUBGROUP_MODES:
             opt.subgroup_mode = "sheets"
         if opt.green_when not in ("above", "below"):
@@ -333,7 +335,7 @@ def monitoring_map(positioning) -> dict[str, set[str]]:
 
 
 def supplier_brand_book(positioning) -> dict:
-    """Ключ поставщика -> каноническое имя и бренды, которые у него мониторят (лист 02)."""
+    """Ключ поставщика -> каноническое имя и бренды, которые у него мониторят (позиционирование, поставщики)."""
     cached = getattr(positioning, "_supplier_brands", None)
     if cached is not None:
         return cached
