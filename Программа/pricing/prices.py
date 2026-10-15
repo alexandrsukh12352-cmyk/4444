@@ -648,11 +648,16 @@ def supplier_layouts_from(sheets: list[Sheet], files: dict) -> dict[str, dict]:
 
 
 def load_price_files(sheets: list[Sheet], profiles: dict, files: dict, known_suppliers: list[str],
-                      competitor_brands: list[str] | None = None) -> list[PriceFile]:
-    """sheets — кандидаты в прайсы; profiles — сохранённые форматы; files — настройки конкретных файлов."""
+                      competitor_brands: list[str] | None = None, learn_sheets: list[Sheet] | None = None) -> list[PriceFile]:
+    """sheets — кандидаты в прайсы; profiles — сохранённые форматы; files — настройки конкретных файлов.
+
+    learn_sheets — откуда брать ручные столбцы поставщиков, если это не те же sheets:
+    прайсы прошлых дат с настройкой учат следующие даты, даже когда сами не разбираются.
+    """
     boot_step("Настройки прайсов", "собираю столбцы поставщиков")
-    merged = {**profiles_from_manual(sheets, files, known_suppliers), **(profiles or {})}
-    layouts = supplier_layouts_from(sheets, files)
+    learn = sheets if learn_sheets is None else learn_sheets
+    merged = {**profiles_from_manual(learn, files, known_suppliers), **(profiles or {})}
+    layouts = supplier_layouts_from(learn, files)
     loaded = []
     total = len(sheets)
     for n, sheet in enumerate(sheets, 1):

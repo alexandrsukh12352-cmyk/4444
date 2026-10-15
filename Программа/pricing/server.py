@@ -27,7 +27,7 @@ from .buildinfo import BUILD, BUILD_LABEL, column_expectation, program_marks
 from .sisters import price_book, sister_of, sister_title
 from .sources import (
     DATA_DIRS, KIND_TITLES, Sources, Workspace, acp_covers, apply_company, attach_shared, collect_files,
-    data_paths, ensure_data_dirs, norm_text, scan, scan_paths, scan_workspace,
+    data_paths, dormant_with_settings, ensure_data_dirs, norm_text, scan, scan_paths, scan_workspace, wake_dormant,
 )
 
 WEB = Path(__file__).with_name("web")
@@ -53,6 +53,8 @@ class State:
         self.lock = threading.Lock()
         self.cache: dict[str, tuple[tuple, Sources]] = {}
         self.workspace_cache: tuple[tuple, Workspace] | None = None
+        # (листы прайсов, настройки и позиционирование, разобранные файлы) — общие для групп.
+        self.price_shared: list[tuple[tuple, tuple, list]] = []
 
     def sources(self, folder: Path) -> Sources:
         paths, price_dirs = scan_paths(folder)
@@ -64,7 +66,8 @@ class State:
             cached = self.cache.get(key)
             if cached and cached[0] == signature:
                 return cached[1]
-        src = scan(paths, price_dirs)
+        src = scan(paths, price_dirs, all_dates=False)
+        src._dormant_owner = src  # type: ignore[attr-defined]
         with self.lock:
             self.cache[key] = (signature, src)
         return src
@@ -123,6 +126,8 @@ class State:
         src = _with_incoming_acp(base, ws, brand, group, trust_local=bool(pack and _is_group_pack(pack)))
         src.oem_rows = list(getattr(ws, "oem_rows", None) or [])
         src.sister_prices = price_book(ws, Settings.load()) if sisters else {}
+        src._dormant_owner = ws.shared  # type: ignore[attr-defined]
+        src._group_args = (root, brand, group, sisters)  # type: ignore[attr-defined]
         locs = list(getattr(ws, "oem_locs", None) or [])
         if locs:
             src.found = dict(src.found)
@@ -131,23 +136,94 @@ class State:
         return src
 
     def price_files(self, src: Sources, settings: Settings) -> list[prices.PriceFile]:
-        """Прайсы с учётом сохранённых форматов; пересчитываются, только если что-то поменялось."""
+        """Прайсы с учётом сохранённых форматов; пересчитываются, только если что-то поменялось.
+
+        Разобранные прайсы общие для всех групп с теми же листами и тем же позиционированием.
+        Раньше каждая группа разбирала все прайсы заново и держала в памяти свою копию —
+        на «Все группы» с большими прайсами программе не хватало памяти.
+        """
         key = json.dumps([settings.price_profiles, settings.price_files], sort_keys=True, ensure_ascii=False)
         with self.lock:
             cached = getattr(src, "_price_cache", None)
             if cached and cached[0] == key:
                 return cached[1]
         positioning = report.load_positioning(src)
-        files = prices.load_price_files(
-            src.price_sheets, settings.price_profiles, settings.price_files,
-            report.known_suppliers(positioning), dynamics.competitor_brand_names(positioning),
-        )
+        known = report.known_suppliers(positioning)
+        brands = dynamics.competitor_brand_names(positioning)
+        sheets = tuple(src.price_sheets)
+        shared_key = (key, tuple(known), tuple(brands))
+        files = None
+        with self.lock:
+            for held_sheets, held_key, held_files in self.price_shared:
+                if held_key == shared_key and len(held_sheets) == len(sheets) and all(
+                    a is b for a, b in zip(held_sheets, sheets)
+                ):
+                    files = held_files
+                    break
+        if files is None:
+            # Прошлые даты не прочитаны, но их ручные столбцы учат следующие даты поставщика.
+            owner = getattr(src, "_dormant_owner", None)
+            extra = dormant_with_settings(owner, settings.price_files) if owner is not None else []
+            learn = None
+            if extra:
+                order = getattr(owner, "price_order", None) or {}
+                big = len(order) + 1
+                both = list(src.price_sheets) + extra
+                learn = [s for _, s in sorted(enumerate(both), key=lambda it: (order.get(str(it[1].file), big), it[0]))]
+            files = prices.load_price_files(
+                src.price_sheets, settings.price_profiles, settings.price_files, known, brands, learn_sheets=learn,
+            )
+            with self.lock:
+                self.price_shared = [(sheets, shared_key, files), *self.price_shared][:3]
         with self.lock:
             src._price_cache = (key, files)  # type: ignore[attr-defined]
         return files
 
 
 STATE = State()
+
+
+def _needs_old_dates(owner: Sources, settings: Settings) -> bool:
+    """Прайсы прошлых дат нужны отчёту, только если последней даты по сути нет.
+
+    Так бывает, когда все файлы последней даты выключены или ни один не прочитался.
+    Тогда, как и раньше, отчёт берёт предыдущую дату.
+    """
+    if not getattr(owner, "dormant_prices", None):
+        return False
+    dated = [s for s in owner.price_sheets if prices.price_date(s.file)]
+    return not any(prices.file_settings(settings.price_files, s).get("enabled", True) for s in dated)
+
+
+def _forget_groups(ws: Workspace) -> None:
+    """Собранные группы держат копию списка прайсов — после дочитки собираем их заново."""
+    ws._group_src = {}  # type: ignore[attr-defined]
+    ws._company_ready = None  # type: ignore[attr-defined]
+    for pack in ws.packs:
+        pack.__dict__.pop("_ready", None)
+
+
+def _wake_owner(owner: Sources) -> bool:
+    """Дочитать прайсы прошлых дат. Разобранные прайсы этого источника считаются заново."""
+    with STATE.lock:
+        woke = wake_dormant(owner)
+        if woke:
+            owner.__dict__.pop("_price_cache", None)
+            owner.__dict__.pop("_price_payload", None)
+            ws = STATE.workspace_cache[1] if STATE.workspace_cache else None
+            if ws is not None and ws.shared is owner:
+                _forget_groups(ws)
+    return woke
+
+
+def _all_dates_sources(body: dict, settings: Settings) -> tuple[Sources, bool]:
+    """Источник с прайсами всех дат: для динамики, устройства прайсов и правки старого файла."""
+    src = _loaded_sources(body, settings)
+    owner = getattr(src, "_dormant_owner", None)
+    if owner is None or not getattr(owner, "dormant_prices", None):
+        return src, False
+    woke = _wake_owner(owner)
+    return (_loaded_sources(body, settings) if woke else src), woke
 
 
 def describe_price(pf: prices.PriceFile, positioning) -> dict:
@@ -883,7 +959,16 @@ def _sister_status(src, rows) -> dict:
 
 
 def _report_prices(src: Sources, settings: Settings) -> list:
-    """Отчёт и проценка смотрят только последнюю дату. Все даты остаются для динамики."""
+    """Отчёт и проценка смотрят только последнюю дату. Все даты остаются для динамики.
+
+    Прошлые даты при старте не читаются. Если последней даты по сути нет — все её файлы
+    выключены или не прочитались, — прошлые даты дочитываются и отчёт берёт предыдущую.
+    """
+    owner = getattr(src, "_dormant_owner", None)
+    if owner is not None and _needs_old_dates(owner, settings) and _wake_owner(owner):
+        args = getattr(src, "_group_args", None)
+        if args:
+            src = STATE.for_group(args[0], args[1], args[2], sisters=args[3])
     return prices.latest_price_files(STATE.price_files(src, settings))
 
 
@@ -1144,6 +1229,10 @@ def api_prices_save(body: dict) -> dict:
     ident = body.get("id")
     sheet = next((s for s in src.price_sheets if prices.price_id(s) == ident or s.label == ident), None)
     if not sheet:
+        # Файл прошлой даты: такие читаются, только когда открывают динамику.
+        src, _ = _all_dates_sources(body, settings)
+        sheet = next((s for s in src.price_sheets if prices.price_id(s) == ident or s.label == ident), None)
+    if not sheet:
         raise UserFacing("Прайс не найден — пересканируйте папку.")
     positioning = report.load_positioning(src)
     key = prices.price_id(sheet)
@@ -1208,7 +1297,7 @@ def api_prices_layout(body: dict) -> dict:
     """
     settings = Settings.load()
     folder = resolve_folder(body.get("folder"), settings)
-    src = _loaded_sources(body, settings)
+    src, _ = _all_dates_sources(body, settings)
     files = STATE.price_files(src, settings)
     text = prices.layout_text(files, BUILD)
     out = _report_dir(settings, folder)
@@ -1244,17 +1333,21 @@ def api_prices_dynamics(body: dict) -> dict:
     """Как изменились цены конкурентов между двумя папками-датами и как за это время изменился курс."""
     settings = Settings.load()
     folder = resolve_folder(body.get("folder"), settings)
-    src = _loaded_sources(body, settings)
+    src, woke = _all_dates_sources(body, settings)
     files = STATE.price_files(src, settings)
     positioning = report.load_positioning(src, settings)
-    return dynamics.build(src, files, positioning, folder, body.get("date_from"), body.get("date_to"))
+    result = dynamics.build(src, files, positioning, folder, body.get("date_from"), body.get("date_to"))
+    if woke:
+        # Прошлые даты прочитались только сейчас — список на вкладке «Прайсы» дополняется ими.
+        result["price_files"] = price_payload(src, settings)
+    return result
 
 
 def api_prices_dynamics_export(body: dict) -> dict:
     """Подробная книга динамики: выводы, бренды, срезы и каждый артикул."""
     settings = Settings.load()
     folder = resolve_folder(body.get("folder"), settings)
-    src = _loaded_sources(body, settings)
+    src, _ = _all_dates_sources(body, settings)
     files = STATE.price_files(src, settings)
     if not files:
         raise UserFacing("Прайсов нет.")

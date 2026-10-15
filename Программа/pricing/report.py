@@ -708,14 +708,24 @@ def without_anomalies(offers: list[PriceOffer]) -> list[PriceOffer]:
 
 
 class PriceIndex:
-    """Цены по (бренд-конкурент, артикул) из АЦПКД и/или прайсов поставщиков."""
+    """Цены по (бренд-конкурент, артикул) из АЦПКД и/или прайсов поставщиков.
+
+    Часть из прайсов одна на все группы: разбирается и очищается от выбросов один раз
+    на набор файлов (_file_offers_clean). У группы своя только часть АЦПКД. Где артикул
+    есть и в АЦПКД, и в прайсах, список собирается как раньше — сначала АЦПКД, потом
+    прайсы — и очищается заново. Числа и порядок предложений те же, что при сборке
+    одного общего словаря.
+    """
 
     def __init__(self, src: Sources, opt: Options, price_files: list[PriceFile] | None = None, monitoring=None):
-        self.offers: dict[tuple[str, str], list[PriceOffer]] = defaultdict(list)
         self.by_source: Counter = Counter()
         self.skipped_by_monitoring = 0
         self.skipped_low = 0
+        self._files: dict[tuple[str, str], list[PriceOffer]] = {}
+        self._own: dict[tuple[str, str], list[PriceOffer]] = {}
+        self._merged: dict | None = None
         in_stock = opt.in_stock_only
+        acp: dict[tuple[str, str], list[PriceOffer]] = {}
         if opt.price_source in ("acp", "both"):
             seen: dict[tuple[str, str], set[tuple]] = defaultdict(set)
             for item in src.acp.values():
@@ -723,7 +733,7 @@ class PriceIndex:
                     b = brand_key(brand)
                     for c in crosses:
                         key = (b, norm_article(c.article))
-                        bucket = self.offers[key]
+                        bucket = acp.setdefault(key, [])
                         known = seen[key]
                         for o in c.offers:
                             if not o.price or in_stock and o.qty is not None and o.qty <= 0:
@@ -734,35 +744,95 @@ class PriceIndex:
                             known.add(mark)
                             bucket.append(PriceOffer(o.supplier, o.price, o.qty, "АЦПКД"))
                             self.by_source["АЦПКД"] += 1
+        raw: dict[tuple[str, str], list[PriceOffer]] = {}
         if opt.price_source in ("prices", "both"):
-            part, skipped = _file_offer_part(price_files, monitoring or {}, opt.monitoring_only, in_stock)
-            self.skipped_by_monitoring += skipped
-            for key, vals in part.items():
-                self.offers[key].extend(vals)
-                self.by_source["Прайсы"] += len(vals)
-        for key, offers in list(self.offers.items()):
+            clean = _file_offers_clean(price_files, monitoring or {}, opt.monitoring_only, in_stock)
+            raw, self._files = clean.raw, clean.kept
+            self.skipped_by_monitoring += clean.skipped
+            self.skipped_low += clean.low
+            if clean.total:
+                self.by_source["Прайсы"] += clean.total
+        for key, own in acp.items():
+            from_files = raw.get(key)
+            if from_files:
+                # Эти цены прайсов уже очищены в общей части — пересчитываем вместе с АЦПКД.
+                self.skipped_low -= len(from_files) - len(self._files.get(key, ()))
+                offers = own + from_files
+            else:
+                offers = own
             kept = without_anomalies(offers)
             self.skipped_low += len(offers) - len(kept)
-            if kept:
-                self.offers[key] = kept
-            else:
-                del self.offers[key]
+            self._own[key] = kept
 
     def get(self, comp_key: str, article: str) -> list[PriceOffer]:
-        return self.offers.get((brand_key(comp_key), norm_article(article)), [])
+        key = (brand_key(comp_key), norm_article(article))
+        own = self._own.get(key)
+        if own is not None:
+            return own
+        return self._files.get(key, [])
+
+    @property
+    def offers(self) -> dict[tuple[str, str], list[PriceOffer]]:
+        """Все цены одним словарём, как раньше. В работе не нужен: get берёт из двух частей."""
+        if self._merged is None:
+            merged = dict(self._files)
+            for key, kept in self._own.items():
+                if kept:
+                    merged[key] = kept
+                else:
+                    merged.pop(key, None)
+            self._merged = merged
+        return self._merged
+
+
+@dataclass
+class _CleanOffers:
+    raw: dict
+    kept: dict
+    skipped: int
+    low: int
+    total: int
+
+
+def _files_key(price_files) -> tuple:
+    return tuple(id(pf) for pf in price_files) if price_files is not None else ()
+
+
+def _cache_get(cache: OrderedDict, key: tuple, refs: tuple):
+    """Попадание в кэш только если объекты те же самые, а не новые с тем же id."""
+    with _CACHE_LOCK:
+        hit = cache.get(key)
+        if hit is None:
+            return None
+        held, value = hit
+        if len(held) != len(refs) or any(a is not b for a, b in zip(held, refs)):
+            return None
+        cache.move_to_end(key)
+        return value
+
+
+def _cache_put(cache: OrderedDict, key: tuple, refs: tuple, value, limit: int) -> None:
+    with _CACHE_LOCK:
+        cache[key] = (refs, value)
+        cache.move_to_end(key)
+        while len(cache) > limit:
+            cache.popitem(last=False)
 
 
 def _file_offer_part(price_files, monitoring, monitoring_only: bool, in_stock: bool):
-    """Цены из прайсов. Одинаковы для всех групп, поэтому считаются один раз на набор файлов."""
-    key = (id(price_files) if price_files is not None else None, id(monitoring), bool(monitoring_only), bool(in_stock))
-    with _CACHE_LOCK:
-        hit = _FILE_OFFERS.get(key)
-        if hit is not None:
-            _FILE_OFFERS.move_to_end(key)
-            return hit
+    """Цены из прайсов. Одинаковы для всех групп, поэтому считаются один раз на набор файлов.
+
+    Ключ — сами файлы, а не список: список последней даты каждый раз новый.
+    """
+    files = tuple(price_files or ())
+    key = ("raw", _files_key(price_files), id(monitoring), bool(monitoring_only), bool(in_stock))
+    refs = (*files, monitoring)
+    hit = _cache_get(_FILE_OFFERS, key, refs)
+    if hit is not None:
+        return hit
     offers: dict[tuple[str, str], list[PriceOffer]] = {}
     skipped = 0
-    for pf in price_files or []:
+    for pf in files:
         if not pf.enabled or pf.problem and not pf.offers:
             continue
         sk = supplier_key(pf.supplier)
@@ -778,30 +848,44 @@ def _file_offer_part(price_files, monitoring, monitoring_only: bool, in_stock: b
                 PriceOffer(pf.supplier_label, o.price, o.qty, pf.sheet.file.name)
             )
     stored = (offers, skipped)
-    with _CACHE_LOCK:
-        _FILE_OFFERS[key] = stored
-        _FILE_OFFERS.move_to_end(key)
-        while len(_FILE_OFFERS) > 8:
-            _FILE_OFFERS.popitem(last=False)
+    _cache_put(_FILE_OFFERS, key, refs, stored, 8)
+    return stored
+
+
+def _file_offers_clean(price_files, monitoring, monitoring_only: bool, in_stock: bool) -> _CleanOffers:
+    """Цены прайсов после отсечения заглушек и выбросов — одни на все группы."""
+    files = tuple(price_files or ())
+    key = ("clean", _files_key(price_files), id(monitoring), bool(monitoring_only), bool(in_stock))
+    refs = (*files, monitoring)
+    hit = _cache_get(_FILE_OFFERS, key, refs)
+    if hit is not None:
+        return hit
+    raw, skipped = _file_offer_part(price_files, monitoring, monitoring_only, in_stock)
+    kept: dict[tuple[str, str], list[PriceOffer]] = {}
+    low = total = 0
+    for k, offers in raw.items():
+        total += len(offers)
+        clean = without_anomalies(offers)
+        low += len(offers) - len(clean)
+        if clean:
+            # Одно предложение возвращается тем же — не держим второй такой же список.
+            kept[k] = offers if len(offers) == 1 and len(clean) == 1 else clean
+    stored = _CleanOffers(raw, kept, skipped, low, total)
+    _cache_put(_FILE_OFFERS, key, refs, stored, 8)
     return stored
 
 
 def index_for(src: Sources, opt: Options, price_files: list[PriceFile] | None, monitoring) -> PriceIndex:
     key = (
-        id(src), id(price_files) if price_files is not None else None, opt.price_source,
+        id(src), _files_key(price_files), opt.price_source,
         bool(opt.monitoring_only), bool(opt.in_stock_only), id(monitoring),
     )
-    with _CACHE_LOCK:
-        hit = _INDEX_CACHE.get(key)
-        if hit is not None:
-            _INDEX_CACHE.move_to_end(key)
-            return hit
+    refs = (src, *(price_files or ()), monitoring)
+    hit = _cache_get(_INDEX_CACHE, key, refs)
+    if hit is not None:
+        return hit
     index = PriceIndex(src, opt, price_files, monitoring)
-    with _CACHE_LOCK:
-        _INDEX_CACHE[key] = index
-        _INDEX_CACHE.move_to_end(key)
-        while len(_INDEX_CACHE) > 24:
-            _INDEX_CACHE.popitem(last=False)
+    _cache_put(_INDEX_CACHE, key, refs, index, 24)
     return index
 
 

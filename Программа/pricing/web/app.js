@@ -1461,6 +1461,12 @@ async function loadDynamics() {
     S.dynamics = await api("/api/prices/dynamics", body);
     S.dynFrom = S.dynamics.date_from || "";
     S.dynTo = S.dynamics.date_to || "";
+    if (S.dynamics.price_files && !S.editing) {
+      // Прайсы прошлых дат читаются только для динамики — теперь их видно и в списке.
+      S.priceFiles = S.dynamics.price_files;
+      if (S.scan) S.scan.price_files = S.dynamics.price_files;
+      renderPriceAudit();
+    }
     renderDynamics();
   } catch (e) {
     note.textContent = e.message;

@@ -18,7 +18,9 @@ from .excel import read_sheets
 
 CACHE_VERSION = 3
 # Общий файл рабочей области версии 3 хранил сетки всех прайсов и подвешивал запуск.
-WORKSPACE_VERSION = 4
+# Версия 5: прайсы прошлых дат в рабочую область не читаются (src.dormant_prices).
+# Старая версия 4 держала их все — её не берём, рабочая область соберётся из кэша файлов.
+WORKSPACE_VERSION = 5
 CACHE_DIR = Path(__file__).resolve().parent.parent / "кэш"
 _lock = threading.Lock()
 _memory: dict[tuple, list] = {}

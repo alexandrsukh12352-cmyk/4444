@@ -240,6 +240,8 @@ class Sources:
     discounts: dict[tuple[str, str, str], float] = field(default_factory=dict)
     gz: dict[str, float] = field(default_factory=dict)  # группа заказа (верхний регистр) -> коэффициент
     warnings: list[str] = field(default_factory=list)
+    dormant_prices: list[Path] = field(default_factory=list)  # прайсы прошлых дат, ещё не прочитаны
+    price_order: dict[str, int] = field(default_factory=dict)  # порядок файлов при чтении папки
 
     def located(self, kind: str) -> Located | None:
         items = self.found.get(kind) or []
@@ -448,7 +450,7 @@ def scan_workspace(root: Path) -> Workspace:
     ensure_data_dirs(root)
     price_dirs = [paths["prices"]] if paths["prices"].is_dir() else []
     shared_paths = [p for p in (paths["crosses"], paths["prices"]) if p.is_dir()]
-    shared = scan(shared_paths, price_dirs) if shared_paths else Sources({}, [])
+    shared = scan(shared_paths, price_dirs, all_dates=False) if shared_paths else Sources({}, [])
     packs = []
     if paths["groups"].is_dir():
         for folder in sorted(p for p in paths["groups"].iterdir() if p.is_dir() and not p.name.startswith(".")):
@@ -640,19 +642,51 @@ def _is_currency_file(path: Path) -> bool:
     return stem == "валюта" or stem.startswith("валюта ") or stem.startswith("валюта_")
 
 
-def scan(paths: list[Path], price_dirs: list[Path] | None = None) -> Sources:
+def _price_sheets_of(f: Path) -> list[Sheet]:
+    return [s for s in read_sheets(f) if any(clean(v) for row in s.grid[:SCAN_PRICE_ROWS] for v in row)]
+
+
+def _older_dates(files: list[Path], price_dirs: list[Path]) -> set[Path]:
+    """Прайсы в папках-датах старше последней. Отчёту они не нужны, только динамике."""
+    from .prices import _shot_sort, price_date
+
+    dated = {}
+    for f in files:
+        if any(d in f.resolve().parents for d in price_dirs) and not _is_currency_file(f):
+            date = price_date(f)
+            if date:
+                dated[f] = date
+    if len(set(dated.values())) < 2:
+        return set()
+    latest = max(dated.values(), key=_shot_sort)
+    return {f for f, date in dated.items() if date != latest}
+
+
+def scan(paths: list[Path], price_dirs: list[Path] | None = None, all_dates: bool = True) -> Sources:
+    """Читает выгрузки и прайсы.
+
+    all_dates=False — прайсы прошлых дат не читаются: отчёт берёт последнюю дату. Их пути
+    лежат в src.dormant_prices, а wake_dormant дочитывает их, когда нужна динамика.
+    Так читает окно программы; по умолчанию, как раньше, читается всё.
+    """
     found: dict[str, list[Located]] = defaultdict(list)
     skipped: list[str] = []
     price_sheets: list[Sheet] = []
     price_dirs = [d.resolve() for d in price_dirs or []]
     recursive = bool(price_dirs) or any(p.is_dir() and p.name in DATA_DIRS.values() for p in paths)
-    for f in collect_files(paths, recursive):
+    files = collect_files(paths, recursive)
+    later = set() if all_dates else _older_dates(files, price_dirs)
+    dormant: list[Path] = []
+    for f in files:
+        if f in later:
+            dormant.append(f)
+            continue
         boot_step("Читаю файл", f.name)
         if any(d in f.resolve().parents for d in price_dirs):
             if _is_currency_file(f):
                 continue
             try:
-                price_sheets += [s for s in read_sheets(f) if any(clean(v) for row in s.grid[:SCAN_PRICE_ROWS] for v in row)]
+                price_sheets += _price_sheets_of(f)
             except Exception as e:  # noqa: BLE001
                 skipped.append(f"{f.name}: не удалось прочитать ({e})")
             continue
@@ -674,6 +708,8 @@ def scan(paths: list[Path], price_dirs: list[Path] | None = None) -> Sources:
             elif any(clean(v) for row in s.grid[:SCAN_PRICE_ROWS] for v in row):
                 price_sheets.append(s)
     src = Sources(dict(found), skipped, price_sheets=price_sheets)
+    src.dormant_prices = dormant
+    src.price_order = {str(f): i for i, f in enumerate(files)}
     for kind, items in src.found.items():
         if len(items) > 1 and kind != "oem":
             items.sort(key=lambda l: l.header.sheet.file.stat().st_mtime, reverse=True)
@@ -681,6 +717,54 @@ def scan(paths: list[Path], price_dirs: list[Path] | None = None) -> Sources:
             src.warnings.append(f"{KIND_TITLES[kind]}: найдено несколько ({names}) — взят {items[0].label}")
     load_all(src)
     return src
+
+
+def dormant_with_settings(src: Sources, files: dict) -> list[Sheet]:
+    """Листы непрочитанных прайсов прошлых дат, у которых есть своя настройка столбцов.
+
+    По ним программа учит столбцы поставщика и форматы для следующих дат, поэтому их
+    читаем и без динамики. Обычно это один-два файла, а не все прошлые даты.
+    """
+    from .prices import price_date, price_id, supplier_folder
+
+    if not files:
+        return []
+    keys = list(files)
+    out: list[Sheet] = []
+    for f in getattr(src, "dormant_prices", None) or []:
+        bits = [b for b in (price_date(f), supplier_folder(f), f.name) if b]
+        heads = {" / ".join(bits), f.name}
+        if not any(k in heads or any(k.startswith(h + " / ") for h in heads) for k in keys):
+            continue
+        try:
+            sheets = _price_sheets_of(f)
+        except Exception:  # noqa: BLE001
+            continue
+        out += [s for s in sheets if files.get(price_id(s)) or files.get(s.label)]
+    return out
+
+
+def wake_dormant(src: Sources) -> bool:
+    """Дочитывает прайсы прошлых дат в src.price_sheets. Порядок листов — как при полном чтении.
+
+    True — если что-то дочитали (тогда разобранные прайсы и группы надо собрать заново).
+    """
+    dormant = list(getattr(src, "dormant_prices", None) or [])
+    if not dormant:
+        return False
+    sheets = list(src.price_sheets)
+    for f in dormant:
+        boot_step("Читаю прайс прошлой даты", f.name)
+        try:
+            sheets += _price_sheets_of(f)
+        except Exception as e:  # noqa: BLE001
+            src.skipped.append(f"{f.name}: не удалось прочитать ({e})")
+    order = getattr(src, "price_order", None) or {}
+    big = len(order) + 1
+    sheets = [s for _, s in sorted(enumerate(sheets), key=lambda item: (order.get(str(item[1].file), big), item[0]))]
+    src.price_sheets = sheets
+    src.dormant_prices = []
+    return True
 
 
 # ---------------------------------------------------------------- чтение
@@ -927,8 +1011,9 @@ def read_oem(loc: Located) -> list[OemItem]:
     return items
 
 
-# Эти папки не справочники ОЕМ. Готовый отчёт и кэш туда не смотрим.
-_OEM_SKIP = {"результат", "кэш", "программа", ".git", "примеры", "__pycache__"}
+# Эти папки не справочники ОЕМ. Готовый отчёт, кэш и прайсы туда не смотрим:
+# иначе ради ОЕМ перечитывались бы прайсы всех дат.
+_OEM_SKIP = {"результат", "кэш", "программа", ".git", "примеры", "__pycache__", "прайсы"}
 
 
 def read_oem_folders(folders: list[Path]) -> tuple[list[OemItem], list[Located]]:

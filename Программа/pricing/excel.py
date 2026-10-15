@@ -105,6 +105,29 @@ def _decode(data: bytes) -> str:
     return data.decode("latin-1")
 
 
+# Быстрое чтение .xlsx потоком (xlsx_fast). Сетка та же, что у openpyxl; если книга
+# устроена непривычно, read_sheets сам откатывается на openpyxl.
+FAST_XLSX = True
+
+
+def _read_xlsx_fast(path: Path) -> list[Sheet]:
+    from .xlsx_fast import read_xlsx
+
+    sheets = []
+    for name, grid, merges in read_xlsx(path):
+        # Как ниже для openpyxl: значение левой верхней ячейки раскладываем на весь диапазон.
+        for min_row, max_row, min_col, max_col in merges:
+            value = grid[min_row - 1][min_col - 1] if min_row - 1 < len(grid) else None
+            for r in range(min_row - 1, min(max_row, len(grid))):
+                row = grid[r]
+                if len(row) < max_col:
+                    row.extend([None] * (max_col - len(row)))
+                for c in range(min_col - 1, max_col):
+                    row[c] = value
+        sheets.append(Sheet(path, name, grid))
+    return sheets
+
+
 def read_sheets(path: Path) -> list[Sheet]:
     ext = path.suffix.lower()
     if ext in (".csv", ".txt"):
@@ -131,6 +154,11 @@ def read_sheets(path: Path) -> list[Sheet]:
         return sheets
     if ext not in (".xlsx", ".xlsm"):
         return []
+    if FAST_XLSX:
+        try:
+            return _read_xlsx_fast(path)
+        except Exception:  # noqa: BLE001 — непривычная книга: читаем как раньше, через openpyxl
+            pass
     wb = openpyxl.load_workbook(path, data_only=True)
     sheets = []
     for ws in wb.worksheets:

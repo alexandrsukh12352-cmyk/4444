@@ -7,8 +7,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-BUILD = "2026-10-13.5"
-BUILD_LABEL = "сборка 13 окт, 5"
+BUILD = "2026-10-15.1"
+BUILD_LABEL = "сборка 15 окт, 1"
 
 
 def column_expectation(brand: str, group: str) -> dict:
