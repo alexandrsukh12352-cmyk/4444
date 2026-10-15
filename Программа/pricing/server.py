@@ -142,8 +142,10 @@ class State:
         Раньше каждая группа разбирала все прайсы заново и держала в памяти свою копию —
         на «Все группы» с большими прайсами программе не хватало памяти.
         """
-        key = json.dumps([settings.price_profiles, settings.price_files, prices.alias_token()],
-                         sort_keys=True, ensure_ascii=False)
+        base = json.dumps([settings.price_profiles, prices.alias_token(), prices.city_token()],
+                          sort_keys=True, ensure_ascii=False)
+        own = json.dumps(settings.price_files, sort_keys=True, ensure_ascii=False)
+        key = base + "\n" + own
         with self.lock:
             cached = getattr(src, "_price_cache", None)
             if cached and cached[0] == key:
@@ -153,15 +155,20 @@ class State:
         brands = dynamics.competitor_brand_names(positioning)
         sheets = tuple(src.price_sheets)
         cross_brands, cross_pairs = cross_keys(src)
-        shared_key = (key, tuple(known), tuple(brands), len(cross_pairs))
+        shared_key = (base, tuple(known), tuple(brands), len(cross_pairs))
         files = None
+        keep = None
         with self.lock:
-            for held_sheets, held_key, held_files in self.price_shared:
-                if held_key == shared_key and len(held_sheets) == len(sheets) and all(
+            for held_sheets, held_key, held_own, held_files in self.price_shared:
+                if held_key == shared_key and held_own == own and len(held_sheets) == len(sheets) and all(
                     a is b for a, b in zip(held_sheets, sheets)
                 ):
                     files = held_files
                     break
+            if files is None:
+                held = next((h for h in self.price_shared if h[1] == shared_key), None)
+                if held is not None:
+                    keep = _reusable(held[3], json.loads(held[2]), settings.price_files, sheets)
         if files is None:
             # Прошлые даты не прочитаны, но их ручные столбцы учат следующие даты поставщика.
             owner = getattr(src, "_dormant_owner", None)
@@ -174,16 +181,50 @@ class State:
                 learn = [s for _, s in sorted(enumerate(both), key=lambda it: (order.get(str(it[1].file), big), it[0]))]
             files = prices.load_price_files(
                 src.price_sheets, settings.price_profiles, settings.price_files, known, brands, learn_sheets=learn,
-                known_brands=cross_brands, cross_pairs=cross_pairs,
+                known_brands=cross_brands, cross_pairs=cross_pairs, keep=keep,
             )
             with self.lock:
-                self.price_shared = [(sheets, shared_key, files), *self.price_shared][:3]
+                self.price_shared = [(sheets, shared_key, own, files), *self.price_shared][:3]
         with self.lock:
             src._price_cache = (key, files)  # type: ignore[attr-defined]
         return files
 
 
 STATE = State()
+
+
+def _reusable(old_files: list, old_settings: dict, new_settings: dict, sheets: tuple) -> dict:
+    """Какие уже разобранные прайсы можно не разбирать заново после правки настроек.
+
+    Правка одного файла меняет его самого и, через «столбцы поставщика», другие файлы того же
+    поставщика. Файлы, узнанные по сохранённой форме или не узнанные, тоже перепроверяются:
+    их может подхватить новая форма. Остальные — те же объекты, без чтения и проверок.
+    """
+    changed = {k for k in set(old_settings) | set(new_settings) if old_settings.get(k) != new_settings.get(k)}
+    current = {id(s) for s in sheets}
+    suppliers = set()
+    for k in changed:
+        for side in (old_settings.get(k) or {}, new_settings.get(k) or {}):
+            if side.get("supplier"):
+                suppliers.add(prices.supplier_key(side["supplier"]))
+        parts = [p.strip() for p in k.split(" / ")]
+        for part in parts[:2]:
+            if part and not prices._normalize_date(part):
+                suppliers.add(prices.supplier_key(part))
+                break
+    keep = {}
+    for pf in old_files:
+        if id(pf.sheet) not in current:
+            continue
+        ident = prices.price_id(pf.sheet)
+        if ident in changed or pf.sheet.label in changed:
+            continue
+        if changed and (pf.status in ("saved", "none")
+                        or prices.supplier_key(pf.folder or pf.supplier) in suppliers
+                        or prices.supplier_key(pf.supplier) in suppliers):
+            continue
+        keep[id(pf.sheet)] = pf
+    return keep
 
 
 _CROSS_KEYS: list = []  # [(словарь кроссов, (бренды, пары))] — держим ссылку, чтобы id не переиспользовался
@@ -254,6 +295,24 @@ def _all_dates_sources(body: dict, settings: Settings) -> tuple[Sources, bool]:
 
 
 def describe_price(pf: prices.PriceFile, positioning) -> dict:
+    token = getattr(positioning, "_mon_token", None)
+    if token is None:
+        token = repr(sorted((str(k), list(v)) for k, v in positioning.monitoring.items()))
+        try:
+            positioning._mon_token = token
+        except AttributeError:
+            pass
+    token = (token, prices.alias_token())
+    held = pf.__dict__.get("_describe")
+    if held is not None and held[0] == token:
+        return held[1]
+    d = _describe_price(pf, positioning)
+    if not pf.__dict__.get("_preview"):
+        pf.__dict__["_describe"] = (token, d)
+    return d
+
+
+def _describe_price(pf: prices.PriceFile, positioning) -> dict:
     competitors = {prices.brand_key(b): b for b in positioning.monitoring}
     keys: dict = {}  # бренд как в прайсе -> ключ; брендов в прайсе мало, строк много
 
@@ -287,12 +346,15 @@ def price_payload(src: Sources, settings: Settings) -> list[dict]:
     positioning = report.load_positioning(src, settings)
     payload = [describe_price(pf, positioning) for pf in files]
     try:
-        notes = price_check.quality_notes(files, dynamics.competitor_brand_names(positioning))
+        notes, info = price_check.quality_split(files, dynamics.competitor_brand_names(positioning))
     except Exception:  # noqa: BLE001 — проверка не должна ронять список прайсов
-        notes = {}
+        notes, info = {}, {}
+    payload = [dict(item) for item in payload]
     for item in payload:
         if notes.get(item["id"]):
             item["quality"] = notes[item["id"]]
+        if info.get(item["id"]):
+            item["info"] = info[item["id"]]
     src._price_payload = (files, payload)
     return payload
 
@@ -1402,8 +1464,23 @@ def _loaded_sources(body: dict, settings: Settings) -> Sources:
 def api_prices_save(body: dict) -> dict:
     """Настройка одного прайса: поставщик, город, вкл/выкл, строка шапки и столбцы.
 
-    dry_run — только показать, что получится; remember — запомнить формат для похожих файлов.
+    dry_run — только показать, что получится (по первым строкам, без чтения всего файла);
+    remember — запомнить формат для похожих файлов.
     """
+    if body.get("dry_run"):
+        return _prices_save(body)
+    bootlog.begin("prices")
+    try:
+        bootlog.step("Сохраняю столбцы", str(body.get("id") or ""))
+        result = _prices_save(body)
+    except Exception as exc:
+        bootlog.fail(str(exc))
+        raise
+    bootlog.finish()
+    return result
+
+
+def _prices_save(body: dict) -> dict:
     settings = Settings.load()
     src = _loaded_sources(body, settings)
     ident = body.get("id")
@@ -1421,7 +1498,8 @@ def api_prices_save(body: dict) -> dict:
         if key != sheet.label:
             settings.price_files.pop(sheet.label, None)
         settings.save()
-        return {"files": price_payload(src, settings)}
+        bootlog.step("Обновляю список прайсов", "перечитываю только этот файл и файлы того же поставщика")
+        return {"files": price_payload(src, Settings.load())}
 
     own = dict(prices.file_settings(settings.price_files, sheet))
     for field in ("supplier", "city", "fixed_brand"):
@@ -1441,35 +1519,27 @@ def api_prices_save(body: dict) -> dict:
     brands = dynamics.competitor_brand_names(positioning)
     cross_brands, cross_pairs = cross_keys(src)
     pf = prices.load_one(sheet, own, settings.price_profiles, report.known_suppliers(positioning), brands,
-                         known_brands=cross_brands, cross_pairs=cross_pairs)
+                         known_brands=cross_brands, cross_pairs=cross_pairs, preview=True)
     if body.get("dry_run"):
         return {"file": describe_price(pf, positioning)}
 
-    bootlog.begin("prices")
-    try:
-        bootlog.step("Сохраняю столбцы", sheet.file.name)
-        if "header_row" not in own:
-            own.pop("cols", None)
-        if key != sheet.label:
-            settings.price_files.pop(sheet.label, None)
-        settings.price_files[key] = own
-        remembered = ""
-        if body.get("remember"):
-            if prices.can_remember(pf):
-                settings.price_profiles[prices.profile_signature(pf)] = prices.make_profile(pf)
-                remembered = "Формат запомнен — он применится к похожим прайсам."
-            else:
-                remembered = "Формат не запомнен: у столбцов артикула и цены нет названий в строке шапки."
-        elif prices.can_remember(pf) and own.get("cols"):
-            remembered = "Столбцы этого поставщика применятся к его следующим файлам, в том числе в других датах."
-        settings.save()
-        bootlog.step("Обновляю список прайсов", "уже разобранные файлы берутся из кэша")
-        payload = price_payload(src, settings)
-    except Exception as exc:
-        bootlog.fail(str(exc))
-        raise
-    bootlog.finish()
-    return {"files": payload, "message": remembered}
+    if "header_row" not in own:
+        own.pop("cols", None)
+    if key != sheet.label:
+        settings.price_files.pop(sheet.label, None)
+    settings.price_files[key] = own
+    remembered = ""
+    if body.get("remember"):
+        if prices.can_remember(pf):
+            settings.price_profiles[prices.profile_signature(pf)] = prices.make_profile(pf)
+            remembered = "Формат запомнен — он применится к похожим прайсам."
+        else:
+            remembered = "Формат не запомнен: у столбцов артикула и цены нет названий в строке шапки."
+    elif prices.can_remember(pf) and own.get("cols"):
+        remembered = "Столбцы этого поставщика применятся к его следующим файлам, в том числе в других датах."
+    settings.save()
+    bootlog.step("Обновляю список прайсов", "перечитываю только этот файл и файлы того же поставщика")
+    return {"files": price_payload(src, Settings.load()), "message": remembered}
 
 
 def api_prices_layout(body: dict) -> dict:
@@ -1716,6 +1786,7 @@ def api_settings_get(_body: dict) -> dict:
         "positioning": s.data.get("positioning") or report.positioning_table(report.load_positioning(Sources({}, []))),
         "positioning_custom": bool(s.data.get("positioning")),
         "defaults_count": {"gz": len(defaults.data.get("gz") or []), "discounts": len(defaults.data.get("discounts") or [])},
+        "city_codes": s.data.get("city_codes") or [],
     }
 
 
@@ -1748,10 +1819,13 @@ def api_settings_save(body: dict) -> dict:
             if any(cells[:3]):
                 rows.append(cells)
         s.data["positioning"] = rows
+    if "city_codes" in body:
+        s.data["city_codes"] = [[clean(a), clean(b)] for a, b, *_ in body["city_codes"] if clean(a) and clean(b)]
     for key in ("suggest_threshold", "open_result", "output"):
         if key in body:
             s.options[key] = body[key]
     s.save()
+    Settings.load()  # коды городов вступают в силу сразу
     return api_settings_get({})
 
 

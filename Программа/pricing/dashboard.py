@@ -222,8 +222,57 @@ def summary(rows: list[Row], opt: Options) -> dict:
         "slices": [{"title": s.title, "kind": s.kind, **s.stats} for s in deviation_slices(rows, ro.enabled)],
         "rec_enabled": ro.enabled, "money_base": basis, "kinds": kinds, "top_changes": impacts[:12],
     }
+    result["change_hist"] = _change_hist(rows) if ro.enabled else None
+    result["limits"] = _limits(rows) if ro.enabled else None
     result["conclusions"] = conclusions(result)
     return result
+
+
+CHANGE_BUCKETS = [
+    (-1e9, -0.10, "< −10%"), (-0.10, -0.05, "−10…−5%"), (-0.05, -0.02, "−5…−2%"), (-0.02, -0.0005, "−2…0%"),
+    (-0.0005, 0.0005, "0"), (0.0005, 0.02, "0…+2%"), (0.02, 0.05, "+2…5%"), (0.05, 0.10, "+5…10%"), (0.10, 1e9, "> +10%"),
+]
+
+
+def _change_hist(rows: list[Row]) -> dict:
+    """Насколько меняются цены по рекомендации: товары и продажи в штуках в каждом диапазоне."""
+    items = [0] * len(CHANGE_BUCKETS)
+    sales = [0.0] * len(CHANGE_BUCKETS)
+    for r in rows:
+        if not r.rec or r.rec.change is None or not r.cat_a:
+            continue
+        for i, (lo, hi, _label) in enumerate(CHANGE_BUCKETS):
+            if lo <= r.rec.change < hi:
+                items[i] += 1
+                sales[i] += r.sales_qty or 0
+                break
+    return {"labels": [b[2] for b in CHANGE_BUCKETS], "items": items, "sales": sales}
+
+
+def _limits(rows: list[Row]) -> list[dict]:
+    """Почему рекомендация такая: по тексту причины у каждого товара."""
+    found = {"band": 0, "free": 0, "capped": 0, "vr": 0, "top": 0, "no_price": 0}
+    for r in rows:
+        if not r.rec:
+            continue
+        reason = r.rec.reason or ""
+        if reason.startswith("нет цены конкурента"):
+            found["no_price"] += 1
+        elif reason.startswith("в пределах позиционирования"):
+            found["band"] += 1
+        elif reason.startswith("топ продаж"):
+            found["top"] += 1
+        elif r.rec.kind == "vr" or "не ниже ВР" in reason:
+            found["vr"] += 1
+        elif "ограничено" in reason:
+            found["capped"] += 1
+        else:
+            found["free"] += 1
+    titles = {
+        "free": "дошли до цели", "capped": "упёрлись в лимит шага", "band": "уже в коридоре — не трогаем",
+        "vr": "подняли до минимальной ВР", "top": "топ продаж категории A — не снижаем", "no_price": "нет цены конкурента",
+    }
+    return [{"key": k, "title": titles[k], "items": v} for k, v in found.items() if v]
 
 
 def _p(v: float | None, signed: bool = False) -> str:

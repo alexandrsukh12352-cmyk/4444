@@ -36,12 +36,7 @@
           <button type="button" data-v="group">Отчёт по группе</button>
           <button type="button" data-v="stock">Распродажа и оверсток</button>
         </div>
-        <div class="seg group-only" id="ui-mode">
-          <button type="button" data-v="template">По шаблону</button>
-          <button type="button" data-v="custom">Индивидуально</button>
-        </div>
-        <button class="btn primary" id="rescan" type="button" title="Заново посмотреть папки. Файл читается снова, только если у него новее дата или другой размер.">Обновить данные</button>
-        <div class="muted group-only" id="template-note"></div>
+        <button class="btn" id="rescan" type="button" title="Заново посмотреть папки. Файл читается снова, только если у него новее дата или другой размер.">Обновить данные</button>
       </div>
       <div id="scan-note"></div>
 
@@ -68,108 +63,85 @@
           <div class="rates-k hidden"></div>
           <div id="rates-note" class="hidden"></div>
 
-          <div class="card" id="card-preview">
-            <div class="card-head">
-              <h2>Аналитика</h2>
-              <span class="sub" id="preview-note">Цифры пересчитываются, когда меняете пороги рекомендаций</span>
-              <div class="seg" id="money-base">
-                <button type="button" data-v="sales">С продаж</button>
-                <button type="button" data-v="potential">С потенциала</button>
-              </div>
-            </div>
-            <div class="settings-block" id="card-recs">
-                <div class="card-head">
-                  <h3>Рекомендованные цены</h3>
-                  <span class="sub" id="rec-scope">Рекомендованные</span>
+          <div class="rep-tabs" id="rep-tabs">
+            <button type="button" data-v="price">Цены и рекомендации</button>
+            <button type="button" data-v="coverage">Почему мало цен</button>
+            <button type="button" data-v="table">Таблица</button>
+            <button type="button" data-v="settings">Настройки отчёта</button>
+          </div>
+
+          <div class="rep-pane" id="pane-price">
+            <div class="price-lab">
+              <aside class="card rec-panel" id="card-recs">
+                <div class="rp-head">
+                  <label class="switch" title="Вставить рекомендованные цены в отчёт"><input type="checkbox" id="rec-enabled"><span></span></label>
+                  <div><b>Рекомендованные цены</b><div class="muted small-text" id="rec-scope"></div></div>
                 </div>
-                <div class="row" style="margin-bottom:8px">
+                <div class="rp-row">
                   <div class="seg" id="rec-scope-mode">
-                    <button type="button" data-v="all">Одна на всех</button>
-                    <button type="button" data-v="group">У каждой группы своя</button>
+                    <button type="button" data-v="all">Одни на всех</button>
+                    <button type="button" data-v="group">Свои у группы</button>
                   </div>
                   <div class="seg" id="rec-source">
                     <button type="button" data-v="mine">Мои</button>
-                    <button type="button" data-v="yours">Рекомендованные</button>
+                    <button type="button" data-v="yours">Зашитые</button>
                   </div>
                 </div>
-                <div class="row" style="margin-bottom:10px">
-                  <button class="btn small" id="rec-save" type="button">Сохранить мои</button>
-                  <button class="btn small ghost" id="rec-reset" type="button">Сбросить к рекомендованным</button>
-                  <button class="btn small ghost" id="rec-reset-all" type="button">Все группы к рекомендованным</button>
-                  <span class="muted small-text hidden" id="rec-dirty">Не сохранено</span>
-                </div>
-                <label class="check rec-toggle"><input type="checkbox" id="rec-enabled"> вставить рек. цены в отчёт</label>
-                <div class="filter" style="margin-top:12px">
-                  <div class="t">По кому ставить цель</div>
-                  <div class="seg" id="rec-target"></div>
-                  <div class="seg hidden" id="rec-all" style="margin-top:8px">
-                    <button type="button" data-v="avg">Среднее</button>
-                    <button type="button" data-v="min">Самая низкая</button>
-                  </div>
-                  <div class="muted small-text" id="rec-target-note"></div>
+                <div class="rp-actions">
+                  <button class="btn small primary" id="rec-save" type="button">Сохранить мои</button>
+                  <button class="btn small ghost" id="rec-reset" type="button">К зашитым</button>
+                  <button class="btn small ghost" id="rec-reset-all" type="button">Все группы к зашитым</button>
+                  <span class="pill warn hidden" id="rec-dirty">не сохранено</span>
                 </div>
                 <div id="rec-body">
-                  <div class="rec-grid">
-                    <div class="filter">
-                      <div class="t">В пределах позиционирования, ±%</div>
-                      <input class="input num-input" id="rec-tolerance" type="number" min="0" max="30" step="0.5">
-                      <div class="muted small-text">Ближе к цели, чем на этот допуск, цену не трогаем</div>
+                  <div class="rp-sec">
+                    <div class="rp-t">Цель — по кому равняемся</div>
+                    <div class="seg" id="rec-target"></div>
+                    <div class="seg hidden" id="rec-all" style="margin-top:6px">
+                      <button type="button" data-v="avg">Среднее</button>
+                      <button type="button" data-v="min">Самая низкая</button>
                     </div>
-                    <div class="filter">
-                      <div class="t">Не понижать больше, %</div>
-                      <input class="input num-input" id="rec-down" type="number" min="0" max="50" step="0.5">
-                    </div>
-                    <div class="filter">
-                      <div class="t">Минимальная ВР, %</div>
-                      <input class="input num-input" id="rec-vr" type="number" min="0" max="90" step="1">
-                    </div>
-                    <div class="filter">
-                      <div class="t">Округление Кат. А, руб.</div>
-                      <input class="input num-input" id="rec-round" type="number" min="0" max="100" step="1">
-                    </div>
-                    <div class="filter">
-                      <div class="t">Не повышать больше, % — по сегменту</div>
-                      <div class="up-grid" id="rec-up"></div>
-                    </div>
+                    <div class="muted small-text" id="rec-target-note"></div>
                   </div>
-                  <div class="rec-grid rec-grid-2">
-                    <div class="filter">
-                      <div class="t">Топ продаж — первые % штук</div>
-                      <div class="row tight">
-                        <input class="input num-input" id="rec-top" type="number" min="10" max="90" step="5">
-                        <span class="muted">лимиты ×</span>
-                        <input class="input num-input" id="rec-top-k" type="number" min="0.1" max="1" step="0.05">
-                      </div>
-                    </div>
-                    <div class="filter">
-                      <div class="t">Середина — до % штук</div>
-                      <div class="row tight">
-                        <input class="input num-input" id="rec-mid" type="number" min="20" max="100" step="5">
-                        <span class="muted">лимиты ×</span>
-                        <input class="input num-input" id="rec-mid-k" type="number" min="0.1" max="1" step="0.05">
-                      </div>
-                    </div>
-                    <div class="filter">
-                      <div class="t">Заливка отклонения</div>
-                      <div class="seg" id="green-when">
-                        <button data-v="above">Зелёный — мы дороже</button>
-                        <button data-v="below">Зелёный — мы дешевле</button>
-                      </div>
-                    </div>
+                  <div id="rec-knobs"></div>
+                </div>
+                <div class="rp-sec">
+                  <div class="rp-t">Как считать</div>
+                  <div class="seg" id="money-base">
+                    <button type="button" data-v="sales">Суммы с продаж</button>
+                    <button type="button" data-v="potential">С потенциала</button>
+                  </div>
+                  <div class="seg" id="green-when" style="margin-top:6px">
+                    <button data-v="above">Зелёный — мы дороже</button>
+                    <button data-v="below">Зелёный — мы дешевле</button>
                   </div>
                 </div>
+              </aside>
+              <div class="rec-live">
+                <div id="dash"></div>
+              </div>
             </div>
-            <div id="dash"></div>
-            <div id="coverage"></div>
-            <div id="preview"></div>
           </div>
 
-          <details class="card" id="group-settings">
-            <summary class="card-head">
-              <h2>Настройки этой группы</h2>
-              <span class="sub">Фильтры, кроссы и источники. Пороги рекомендаций — в аналитике выше</span>
-            </summary>
-            <div class="settings-body">
+          <div class="rep-pane hidden" id="pane-coverage">
+            <div class="card"><div id="coverage"></div></div>
+          </div>
+
+          <div class="rep-pane hidden" id="pane-table">
+            <div class="card">
+              <div class="card-head"><h2>Первые строки отчёта</h2><span class="sub" id="preview-note"></span></div>
+              <div id="preview"></div>
+            </div>
+          </div>
+
+          <div class="rep-pane hidden" id="pane-settings">
+            <div class="card" id="group-settings">
+              <div class="card-head">
+                <h2>Настройки отчёта</h2>
+                <span class="sub">Фильтры, прайсы, кроссы и источники — одни на все группы и запоминаются</span>
+                <div class="right"><button class="btn small" id="preset-standard" type="button" title="Все товары, цены из АЦПКД и прайсов, кроссы — как подскажет программа">Сбросить к стандарту</button></div>
+              </div>
+              <div class="settings-body">
               <div class="settings-block">
                 <h3>Подгруппы и вид отчёта</h3>
                 <div class="subgroups" id="subgroups"></div>
@@ -184,7 +156,7 @@
                 <div class="muted small-text">Позиционирование — по подгруппе каждой строки.</div>
               </div>
 
-              <div class="settings-block custom-only" id="card-filters">
+              <div class="settings-block" id="card-filters">
                 <div class="card-head">
                   <h3>Фильтры</h3>
                   <div class="right">
@@ -201,7 +173,7 @@
                 <div class="counter" id="counter"></div>
               </div>
 
-              <div class="settings-block custom-only" id="card-prices">
+              <div class="settings-block" id="card-prices">
                 <h3>Цены конкурентов</h3>
                 <div class="muted small-text">По каждому кроссу берётся минимальная цена среди поставщиков. Прайсы — на последнюю дату выгрузки; ненужный файл можно выключить.</div>
                 <div class="price-controls">
@@ -220,7 +192,7 @@
                 <div id="price-files"></div>
               </div>
 
-              <div class="settings-block custom-only" id="card-crosses">
+              <div class="settings-block" id="card-crosses">
                 <div class="card-head">
                   <h3>Кроссы</h3>
                   <div class="right">
@@ -243,14 +215,15 @@
                 <div id="crosses"></div>
               </div>
 
-              <div class="settings-block custom-only" id="card-sources">
+              <div class="settings-block" id="card-sources">
                 <h3>Откуда брать данные</h3>
                 <div class="muted small-text">По каждому полю отдельно. Справа — насколько расходятся наши выгрузки и АЦПКД по товарам отчёта</div>
                 <div class="src-grid" id="sources"></div>
               </div>
 
+              </div>
             </div>
-          </details>
+          </div>
 
           <div id="result"></div>
         </div>
@@ -391,6 +364,14 @@
         </div>
       </div>
 
+      <div class="card">
+        <div class="card-head"><h2>Города в именах прайсов</h2><span class="sub">свои коды, если программа не узнала город: RZD — Раздольное</span>
+          <div class="right"><button class="btn small" id="city-add" type="button">Добавить</button></div>
+        </div>
+        <div class="muted" style="font-size:13px; margin-bottom:10px">Сама программа узнаёт коды и названия: EKB, ЕКБ, SPB1, «_Иркутск», «(Омск)», NVS, VLK. Город в скобках важнее: BergIRK(Чита) — Чита. Город нужен, чтобы сравнивать цены одного склада по датам — называйте файлы одного склада одинаково.</div>
+        <div class="table-wrap settings-table"><table><thead><tr><th>Код в имени файла</th><th>Город</th><th></th></tr></thead><tbody id="cities"></tbody></table></div>
+      </div>
+
       <div class="grid-2">
         <div class="card">
           <div class="card-head"><h2>ГЗ — коэффициенты</h2><span class="sub" id="gz-count"></span>
@@ -452,7 +433,7 @@
           </div>
         </div>
         <div class="muted" style="font-size:13px; margin-bottom:12px">
-          В шапке окна должно быть «сборка 15 окт, 3». Если этой надписи нет, открыта старая копия: закройте чёрное окно и запустите Запуск.bat из новой папки.
+          В шапке окна должно быть «сборка 16 окт, 1». Если этой надписи нет, открыта старая копия: закройте чёрное окно и запустите Запуск.bat из новой папки.
         </div>
         <div class="notes" id="diag-marks"></div>
       </div>

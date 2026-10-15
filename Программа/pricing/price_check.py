@@ -80,7 +80,9 @@ def brand_hints(files: list[PriceFile], competitor_names: list[str], crosses: di
     for pf in files:
         if not pf.enabled:
             continue
-        local: Counter = Counter(o.brand for o in pf.offers)
+        local = pf.__dict__.get("_brand_counts")
+        if local is None:
+            local = pf.__dict__["_brand_counts"] = Counter(o.brand for o in pf.offers)
         for brand, n in local.items():
             raw = raw_brand_key(brand)
             if not raw:
@@ -150,6 +152,33 @@ def _summary(files: list[PriceFile], competitor_keys: set[str]) -> dict:
     }
 
 
+_SUMS: dict = {}  # (группа, дата, бренды) -> (файлы, сводка): та же группа файлов не пересчитывается
+
+
+def _cached_summary(gkey: str, date: str, part: list[PriceFile], competitor_keys: set[str]) -> dict:
+    token = (gkey, date, tuple(sorted(competitor_keys)))
+    held = _SUMS.get(token)
+    if held is not None and len(held[0]) == len(part) and all(a is b for a, b in zip(held[0], part)):
+        return held[1]
+    summary = _summary(part, competitor_keys)
+    _SUMS[token] = (list(part), summary)
+    return summary
+
+
+INFO_PREFIXES = ("цен меньше", "пропал бренд")
+
+
+def quality_split(files: list[PriceFile], competitor_names: list[str]) -> tuple[dict, dict]:
+    """(замечания, справки). «Цен меньше» и «пропал бренд» — справка: так бывает, когда в этот день
+    у поставщика и города меньше файлов. «Медиана цены ушла» — замечание: похоже, столбец не тот."""
+    warn: dict[str, list[str]] = {}
+    info: dict[str, list[str]] = {}
+    for ident, notes in quality_notes(files, competitor_names).items():
+        for text in notes:
+            (info if text.startswith(INFO_PREFIXES) else warn).setdefault(ident, []).append(text)
+    return warn, info
+
+
 def quality_notes(files: list[PriceFile], competitor_names: list[str]) -> dict[str, list[str]]:
     """id файла -> замечания по сравнению с прошлой датой того же поставщика и города.
 
@@ -165,7 +194,7 @@ def quality_notes(files: list[PriceFile], competitor_names: list[str]) -> dict[s
             current[(_group_key(pf), pf.shot_date)].append(pf)
     changed = False
     for (gkey, date), part in current.items():
-        summary = _summary(part, competitor_keys)
+        summary = _cached_summary(gkey, date, part, competitor_keys)
         if groups.setdefault(gkey, {}).get(date) != summary:
             groups[gkey][date] = summary
             changed = True

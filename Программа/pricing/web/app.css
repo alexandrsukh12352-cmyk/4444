@@ -676,3 +676,62 @@ tr.px-bad td { background: #fff8f6; }
   .dv-row, .dr-row { grid-template-columns: 90px minmax(0, 1fr) 120px; }
   .dv-head { padding-left: 100px; }
 }
+.info-note { color: var(--accent); background: var(--accent-soft); border-radius: 6px; padding: 2px 6px; margin-top: 3px; font-size: 12.5px; }
+tr.ed-row > td { background: #f7fafb; padding: 0; }
+tr.ed-row .pf-editor { margin: 0; border-radius: 0; }
+
+/* ---------- отчёты: подвкладки, панель порогов, живая аналитика */
+.rep-tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin: 2px 0 2px; overflow-x: auto; }
+.rep-tabs button { background: none; border: 0; border-bottom: 3px solid transparent; padding: 10px 14px; font-weight: 600; color: var(--muted); cursor: pointer; white-space: nowrap; }
+.rep-tabs button:hover { color: var(--ink); }
+.rep-tabs button.on { color: var(--accent); border-bottom-color: var(--accent); }
+.rep-pane { display: grid; gap: 16px; }
+.price-lab { display: grid; grid-template-columns: 330px minmax(0, 1fr); gap: 16px; align-items: start; }
+.rec-panel { position: sticky; top: 70px; max-height: calc(100vh - 170px); overflow: auto; padding: 16px; display: grid; gap: 10px; }
+.rp-head { display: flex; gap: 12px; align-items: center; }
+.rp-row { display: flex; gap: 6px; flex-wrap: wrap; }
+.rp-row .seg button { padding: 0 9px; }
+.rp-actions { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.rp-sec { border-top: 1px solid var(--line); padding-top: 10px; display: grid; gap: 6px; }
+.rp-t { font-size: 12px; font-weight: 700; color: var(--ink-2); text-transform: uppercase; letter-spacing: .3px; }
+#rec-body.off { opacity: .45; pointer-events: none; }
+.knob { display: grid; gap: 2px; }
+.knob-head { display: flex; justify-content: space-between; gap: 8px; align-items: center; font-size: 13px; }
+.knob-val { white-space: nowrap; color: var(--muted); font-size: 12.5px; }
+.knob-num { width: 62px; height: 26px; padding: 0 6px; text-align: right; font-weight: 650; color: var(--accent); }
+.knob-range { width: 100%; accent-color: var(--accent); margin: 2px 0 0; }
+.rec-live { display: grid; gap: 14px; min-width: 0; }
+.kpis.live { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); margin: 0; }
+.kpi .v .to { font-size: 15px; color: var(--ink-2); font-weight: 650; }
+.kpi.good .s { color: var(--good); font-weight: 650; }
+.kpi.bad .s { color: var(--bad); font-weight: 650; }
+.kpi .up-t { color: #b42318; }
+.kpi .dn-t { color: #1d4ed8; }
+.live-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; margin-top: 14px; }
+.card.flat { box-shadow: none; padding: 14px 16px; }
+details.card.flat > summary { cursor: pointer; }
+.hb { display: grid; gap: 6px; }
+.hb-row { display: grid; grid-template-columns: minmax(140px, 1.2fr) minmax(0, 1fr) 90px; gap: 10px; align-items: center; font-size: 13px; }
+.hb-track, .fn-track { height: 14px; background: #f1f4f6; border-radius: 4px; overflow: hidden; }
+.hb-track i, .fn-track i { display: block; height: 100%; border-radius: 4px; }
+.hb-num, .fn-num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.why-box { background: var(--amber-soft); border-radius: 10px; padding: 12px 14px; margin: 10px 0 14px; }
+.fn-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(420px, 1fr)); gap: 12px; }
+.fn-card { border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; display: grid; gap: 6px; }
+.fn-head { display: grid; gap: 2px; margin-bottom: 4px; }
+.fn-head .muted { font-size: 12.5px; }
+.fn-row { display: grid; grid-template-columns: minmax(170px, 1.3fr) minmax(0, 1fr) 120px; gap: 10px; align-items: center; font-size: 13px; }
+.fn-lost { color: var(--bad); margin-left: 6px; font-size: 12px; }
+@media (max-width: 1100px) {
+  .price-lab { grid-template-columns: minmax(0, 1fr); }
+  .rec-panel { position: static; max-height: none; }
+  .live-grid { grid-template-columns: minmax(0, 1fr); }
+}
+.price-lab > *, .live-grid > *, .rec-live > * { min-width: 0; }
+.note-fold { background: var(--warn-soft); color: #7a5600; border-radius: 10px; padding: 8px 12px; font-size: 13px; }
+.note-fold summary { cursor: pointer; }
+.note-fold .notes { margin-top: 8px; }
+.rec-live .table-wrap { overflow-x: auto; }
+.rec-live .ellip { max-width: 260px; }
+.live-grid > .wide { grid-column: 1 / -1; }
+.ch-small { font-size: 10px; }

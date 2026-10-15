@@ -139,3 +139,70 @@ def test_brand_aliases_api_takes_a_batch_and_an_ignore_list(tmp_path, monkeypatc
     finally:
         prices.set_brand_aliases([])
         settings_mod._drop_loads()
+
+
+# ---------------------------------------------------------------- город из имени файла
+
+
+def test_city_from_russian_names_brackets_and_user_codes():
+    cases = {
+        "Прайс Армтек_Иркутск.xlsx": "Иркутск", "Прайс Армтек_ЕКБ.xlsx": "Екатеринбург",
+        "Прайс Армтек_МСК_РПП.xlsx": "Москва", "FORUM_AUTO_PRICE_NVS.csv": "Новосибирск",
+        "FORUM_AUTO_PRICE_VLK3.csv": "Владивосток", "Armtek(Омск).xlsx": "Омск", "BergIRK(Чита).xlsx": "Чита",
+        "Shate-MKRS.csv": "Красноярск", "TissEKB.xls": "Екатеринбург", "FORUM_AUTO_PRICE.csv": "",
+    }
+    assert {n: prices.city_from_name(n) for n in cases} == cases
+    try:
+        prices.set_city_codes([["RZD", "Раздольное"]])
+        assert prices.city_from_name("FORUM_AUTO_RZD.csv") == "Раздольное" and prices.city_token()
+    finally:
+        prices.set_city_codes([])
+    assert prices.city_from_name("FORUM_AUTO_RZD.csv") == ""
+
+
+# ---------------------------------------------------------------- правка одного прайса
+
+
+def test_saving_one_price_rereads_only_that_supplier(tmp_path, monkeypatch):
+    from test_speed import _workspace
+
+    server, _ = _workspace(tmp_path, monkeypatch)
+    other = tmp_path / "Данные" / "Прайсы" / "06.10.2026" / "Berg"
+    other.mkdir(parents=True)
+    (other / "BergEKB.csv").write_text("Бренд;Артикул;Цена\nBrembo;B1;1200\nAkebono;K1;600\n", encoding="utf-8")
+    server.api_scan({"folder": str(tmp_path)})
+    src = server.STATE.for_group(tmp_path, "", "")
+    from pricing.settings import Settings
+
+    before = {pf.supplier: pf for pf in server.STATE.price_files(src, Settings.load())}
+    tiss = next(f for f in before.values() if f.supplier == "TISS")
+    calls = []
+    real = prices.load_one
+    monkeypatch.setattr(prices, "load_one", lambda sheet, *a, **k: calls.append(sheet.file.name) or real(sheet, *a, **k))
+    preview = server.api_prices_save({"folder": str(tmp_path), "id": tiss.id, "city": "Москва", "dry_run": True})
+    assert preview["file"]["preview_only"] and preview["file"]["city"] == "Москва"
+    calls.clear()
+    server.api_prices_save({"folder": str(tmp_path), "id": tiss.id, "city": "Москва"})
+    assert "BergEKB.csv" not in calls and "tiss.csv" in calls
+    after = {pf.supplier: pf for pf in server.STATE.price_files(src, Settings.load())}
+    assert after["Berg"] is before["Berg"] and after["TISS"].city == "Москва"
+
+
+def test_city_set_by_hand_carries_to_the_same_file_on_next_dates(tmp_path):
+    base = tmp_path / "Прайсы"
+    body = "Бренд;Артикул;Цена\nBrembo;B1;100\nBrembo;B2;200\n"
+    for date, names in (("14.10.2026", ["118482.csv", "BERG_X_20261014_040019.csv"]),
+                        ("15.10.2026", ["118482.csv", "BERG_X_20261015_041120.csv", "43256.csv"])):
+        folder = base / date / "Склад"
+        folder.mkdir(parents=True)
+        for name in names:
+            (folder / name).write_text(body, encoding="utf-8")
+    sheets = scan([base], [base]).price_sheets
+    old = [s for s in sheets if "14.10.2026" in str(s.file)]
+    files = {prices.price_id(s): {"city": "Южно-Сахалинск" if s.file.name.startswith("118482") else "Чита"} for s in old}
+    loaded = prices.load_price_files(sheets, {}, files, [], BRANDS)
+    got = {(pf.shot_date, pf.sheet.file.name): pf.city for pf in loaded}
+    assert got[("15.10.2026", "118482.csv")] == "Южно-Сахалинск"
+    assert got[("15.10.2026", "BERG_X_20261015_041120.csv")] == "Чита"
+    assert got[("15.10.2026", "43256.csv")] == ""
+    assert prices.stem_key("price_all2_261015_1.xlsx") == "priceall2"

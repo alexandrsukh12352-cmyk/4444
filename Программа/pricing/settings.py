@@ -81,7 +81,7 @@ class Settings:
         data["options"] = dict(DEFAULT_OPTIONS)
         if user_file:
             user = _read(user_file)
-            for item in ("gz", "discounts", "price_profiles", "price_files", "cars", "positioning", "brand_aliases"):
+            for item in ("gz", "discounts", "price_profiles", "price_files", "cars", "positioning", "brand_aliases", "city_codes"):
                 if item in user:
                     data[item] = user[item]
             if "currency_rates" in user:
@@ -92,6 +92,9 @@ class Settings:
             from .prices import set_brand_aliases
 
             set_brand_aliases(data.get("brand_aliases"))
+            from .prices import set_city_codes
+
+            set_city_codes(data.get("city_codes"))
         if key is not None:
             _LOADS[key] = loaded
             if len(_LOADS) > 8:

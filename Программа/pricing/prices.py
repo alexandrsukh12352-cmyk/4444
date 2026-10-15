@@ -253,13 +253,108 @@ def match_known(text: str, known: list[str]) -> str:
     return ""
 
 
-def city_from_name(name: str) -> str:
-    """Город только по известному коду в имени: EKB, SPB, NSK. Случайное слово городом не становится."""
-    letters = re.sub(r"[^A-Za-z]", " ", Path(name).stem).upper().split()
-    for token in letters:
-        if token in CITY_CODES:
-            return CITY_CODES[token]
+# Русские названия и сокращения в именах файлов: «Прайс Армтек_Иркутск», «_ЕКБ», «(Омск)».
+CITY_WORDS = {
+    "ЕКБ": "Екатеринбург", "ЕКАТ": "Екатеринбург", "ЕКАТЕРИНБУРГ": "Екатеринбург", "EKT": "Екатеринбург",
+    "СПБ": "Санкт-Петербург", "ПИТЕР": "Санкт-Петербург", "САНКТПЕТЕРБУРГ": "Санкт-Петербург",
+    "МСК": "Москва", "МОСКВА": "Москва", "НСК": "Новосибирск", "НОВОСИБИРСК": "Новосибирск", "NVS": "Новосибирск",
+    "NOVOSIBIRSK": "Новосибирск", "ОМСК": "Омск", "OMS": "Омск", "КРД": "Краснодар", "КРАСНОДАР": "Краснодар",
+    "КАЗАНЬ": "Казань", "КЗН": "Казань", "VLD": "Владивосток", "VLK": "Владивосток", "VLAD": "Владивосток",
+    "ВЛД": "Владивосток", "ВЛАДИВОСТОК": "Владивосток", "ХБР": "Хабаровск", "ХБК": "Хабаровск", "HBK": "Хабаровск",
+    "HAB": "Хабаровск", "ХАБАРОВСК": "Хабаровск", "ИРК": "Иркутск", "ИРКУТСК": "Иркутск", "КРС": "Красноярск",
+    "KRSK": "Красноярск", "КРАСНОЯРСК": "Красноярск", "БРН": "Барнаул", "БАРНАУЛ": "Барнаул", "BLG": "Благовещенск",
+    "БЛГ": "Благовещенск", "БЛАГОВЕЩЕНСК": "Благовещенск", "ЧИТА": "Чита", "CHITA": "Чита", "САХАЛИН": "Южно-Сахалинск",
+    "ЮЖНОСАХАЛИНСК": "Южно-Сахалинск", "СМР": "Самара", "САМАРА": "Самара", "ТЮМЕНЬ": "Тюмень", "ЧЕЛЯБИНСК": "Челябинск",
+    "ПЕРМЬ": "Пермь", "УФА": "Уфа", "РОСТОВ": "Ростов-на-Дону", "ВОРОНЕЖ": "Воронеж", "ТОМСК": "Томск", "TOMSK": "Томск",
+    "КЕМЕРОВО": "Кемерово", "НОВОКУЗНЕЦК": "Новокузнецк", "УЛАНУДЭ": "Улан-Удэ", "ЯКУТСК": "Якутск",
+}
+_USER_CITIES: dict[str, str] = {}
+_CITY_TOKEN = ""
+_SPLIT_CITY = re.compile(r"[^0-9A-Za-zА-Яа-яЁё]+")
+_CAMEL = re.compile(r"(?<=[a-zа-яё])(?=[A-ZА-ЯЁ])")
+
+
+def _city_key(token: str) -> str:
+    return re.sub(r"\d+$", "", token.upper().replace("Ё", "Е"))
+
+
+def set_city_codes(rows) -> None:
+    """Свои коды городов из настроек: [«RZD», «Раздольное»]. Важнее встроенных."""
+    global _CITY_TOKEN
+    _USER_CITIES.clear()
+    for row in rows or []:
+        if isinstance(row, (list, tuple)) and len(row) >= 2 and clean(row[0]) and clean(row[1]):
+            _USER_CITIES[_city_key(re.sub(r"[^0-9A-Za-zА-Яа-яЁё]", "", clean(row[0])))] = clean(row[1])
+    _CITY_TOKEN = "|".join(f"{k}={v}" for k, v in sorted(_USER_CITIES.items()))
+
+
+def city_token() -> str:
+    return _CITY_TOKEN
+
+
+def known_cities() -> set[str]:
+    return set(CITY_CODES.values()) | set(CITY_WORDS.values()) | set(_USER_CITIES.values())
+
+
+def _city_in(text: str) -> str:
+    tokens = []
+    for part in _SPLIT_CITY.split(text):
+        if part:
+            tokens.append(part)
+            tokens.extend(t for t in _CAMEL.split(part) if t and t != part)
+    joined = _city_key("".join(_SPLIT_CITY.split(text)))
+    for token in tokens:
+        key = _city_key(token)
+        for book in (_USER_CITIES, CITY_CODES, CITY_WORDS):
+            if key in book:
+                return book[key]
+    for book in (_USER_CITIES, CITY_WORDS):
+        if joined in book:
+            return book[joined]
+    # «Shate-MKRS»: код города приклеен к хвосту имени поставщика.
+    for token in tokens:
+        key = _city_key(token)
+        if key.isascii() and key.isupper() and 4 <= len(key) <= 6 and key[-3:] in CITY_CODES:
+            return CITY_CODES[key[-3:]]
     return ""
+
+
+def city_from_name(name: str) -> str:
+    """Город только по известному коду или названию в имени: EKB, SPB1, «_Иркутск», «(Омск)», «ЕКБ».
+
+    Город в скобках важнее: «BergIRK(Чита)» — Чита, «Armtek(Омск)» — Омск. Случайное слово городом не становится.
+    """
+    stem = Path(name).stem
+    for part in re.findall(r"\(([^)]*)\)", stem):
+        city = _city_in(part)
+        if city:
+            return city
+    return _city_in(re.sub(r"\([^)]*\)", " ", stem))
+
+
+_STAMP = re.compile(r"[_\-\s]?20\d{6}(?:[_\-]\d{4,6})?|[_\-]\d{6}[_\-]\d{1,2}$")
+
+
+def stem_key(name: str) -> str:
+    """Имя файла без даты выгрузки: «BERG_IRK_20261015_040019» и «BERG_IRK_20261016_041120» — один ключ.
+
+    Номер, который не похож на дату («118482» у Rossko), остаётся: по нему узнаётся склад.
+    """
+    stem = _STAMP.sub("", Path(name).stem)
+    return re.sub(r"[^0-9a-zа-яё]", "", stem.lower().replace("ё", "е"))
+
+
+def learned_cities(sheets: list[Sheet], files: dict) -> dict[tuple[str, str], str]:
+    """Город, указанный у файла вручную, действует на этот же файл поставщика в следующих датах."""
+    out: dict[tuple[str, str], str] = {}
+    for sheet in sheets:
+        own = file_settings(files, sheet)
+        city = clean(own.get("city"))
+        if not city:
+            continue
+        name = own.get("supplier") or supplier_folder(sheet.file) or sheet.file.stem
+        out[(supplier_key(name), stem_key(sheet.file.name))] = city
+    return out
 
 
 def guess_supplier(name: str, known: list[str]) -> tuple[str, str]:
@@ -489,14 +584,14 @@ def explain_header(sheet: Sheet) -> str:
     return "Шапка не узнана сама. " + "; ".join(bits)
 
 
-def read_offers(pf: PriceFile) -> None:
+def read_offers(pf: PriceFile, head_only: bool = False) -> None:
     pf.offers = []
     if not pf.header or not all(f in pf.cols for f in REQUIRED):
         return
     c = pf.cols
     # Цены собираются по всему листу. У прайса в памяти только начало — полный лист берём из кэша.
     first = pf.data_from if pf.data_from >= 0 else pf.header.row + pf.header.depth
-    data = pf.sheet.full_grid()[first:]
+    data = (pf.sheet.grid if head_only else pf.sheet.full_grid())[first:]
     # У файла без шапки «шапка» — это строка с ценой, её тоже читаем.
     title = "" if pf.headerless else norm_text(pf.header.raw[c["article"]])
     for i, row in enumerate(data):
@@ -749,7 +844,8 @@ def _check_article(pf: PriceFile, pairs: set) -> None:
 
 def load_one(sheet: Sheet, own: dict, profiles: dict, known_suppliers: list[str],
              competitor_brands: list[str] | None = None, supplier_layouts: dict | None = None,
-             known_brands: set | None = None, cross_pairs: set | None = None) -> PriceFile:
+             known_brands: set | None = None, cross_pairs: set | None = None, preview: bool = False,
+             cities: dict | None = None) -> PriceFile:
     folder = supplier_folder(sheet.file)
     name_supplier, city = guess_supplier(sheet.file.name, known_suppliers)
     folder_name = match_known(folder, known_suppliers) or clean(folder) if folder else ""
@@ -760,11 +856,13 @@ def load_one(sheet: Sheet, own: dict, profiles: dict, known_suppliers: list[str]
         supplier = folder_name
         supplier_from = "folder"
         # Город — только узнанный код (EKB, NSK). «price.xlsx» не становится городом PRICE.
-        city = city if city in CITY_CODES.values() else ""
+        city = city if city in known_cities() else ""
     else:
         supplier = name_supplier
         supplier_from = "file"
     city = own.get("city", city)
+    if not city and cities and "city" not in own:
+        city = cities.get((supplier_key(folder_name or supplier), stem_key(sheet.file.name)), "")
     file_known = match_known(sheet.file.stem, known_suppliers)
     mismatch = bool(folder_name and file_known and supplier_key(folder_name) != supplier_key(file_known))
     header, cols, status = None, {}, "none"
@@ -816,7 +914,11 @@ def load_one(sheet: Sheet, own: dict, profiles: dict, known_suppliers: list[str]
         pf.problem = "укажите столбцы артикула и цены"
     elif header and "brand" not in cols and not pf.fixed_brand:
         pf.problem = "нет столбца бренда — укажите бренд для всего прайса"
-    if header and all(f in cols for f in REQUIRED):
+    if header and all(f in cols for f in REQUIRED) and preview:
+        # Предпросмотр в окне настройки: только начало листа, без чтения всего файла и без кэша.
+        read_offers(pf, head_only=True)
+        pf.__dict__["_preview"] = True
+    elif header and all(f in cols for f in REQUIRED):
         token = _offer_token(sheet.file, header.row, cols, pf.fixed_brand, pf.data_from)
         cached = _load_offers(token)
         if cached is not None:
@@ -899,7 +1001,8 @@ def supplier_layouts_from(sheets: list[Sheet], files: dict) -> dict[str, dict]:
 
 def load_price_files(sheets: list[Sheet], profiles: dict, files: dict, known_suppliers: list[str],
                       competitor_brands: list[str] | None = None, learn_sheets: list[Sheet] | None = None,
-                      known_brands: set | None = None, cross_pairs: set | None = None) -> list[PriceFile]:
+                      known_brands: set | None = None, cross_pairs: set | None = None,
+                      keep: dict | None = None) -> list[PriceFile]:
     """sheets — кандидаты в прайсы; profiles — сохранённые форматы; files — настройки конкретных файлов.
 
     learn_sheets — откуда брать ручные столбцы поставщиков, если это не те же sheets:
@@ -909,13 +1012,22 @@ def load_price_files(sheets: list[Sheet], profiles: dict, files: dict, known_sup
     learn = sheets if learn_sheets is None else learn_sheets
     merged = {**profiles_from_manual(learn, files, known_suppliers), **(profiles or {})}
     layouts = supplier_layouts_from(learn, files)
+    cities = learned_cities(learn, files)
     loaded = []
     total = len(sheets)
-    for n, sheet in enumerate(sheets, 1):
-        boot_step("Разбираю прайс", f"{n} из {total} · {sheet.file.name}")
+    keep = keep or {}
+    todo = sum(1 for s in sheets if id(s) not in keep)
+    done = 0
+    for sheet in sheets:
+        if id(sheet) in keep:
+            # Настройки этого файла и его поставщика не менялись — разбор тот же.
+            loaded.append(keep[id(sheet)])
+            continue
+        done += 1
+        boot_step("Разбираю прайс", f"{done} из {todo} · {sheet.file.name}")
         loaded.append(load_one(
             sheet, file_settings(files, sheet), merged, known_suppliers, competitor_brands, layouts,
-            known_brands, cross_pairs,
+            known_brands, cross_pairs, cities=cities,
         ))
     return loaded
 
@@ -1170,6 +1282,7 @@ def describe(pf: PriceFile, sample: int = 6) -> dict:
         "why": pf.why,
         "can_remember": can_remember(pf),
         "rows": pf.sheet.rows,
+        "preview_only": bool(pf.__dict__.get("_preview")),
         "head_rows": [
             {"row": i + 1, "text": " · ".join(clean(v) for v in row if clean(v))[:160]}
             for i, row in enumerate(pf.sheet.grid[:SCAN_ROWS])
