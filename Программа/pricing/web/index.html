@@ -1,0 +1,597 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ценовой анализ</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230f4c5c'/%3E%3Cpath d='M8 22l5-6 4 3 7-9' stroke='%23fff' stroke-width='2.6' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="brand">
+        <div class="brand-mark">
+          <svg width="18" height="18" viewBox="0 0 32 32" aria-hidden="true"><path d="M5 23l7-8 5 4 10-12" stroke="#fff" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </div>
+        <span>Ценовой анализ</span>
+        <span class="build-tag" id="build-tag"></span>
+      </div>
+      <nav class="tabs" id="tabs">
+        <button class="tab active" data-tab="report">Отчёт</button>
+        <button class="tab" data-tab="settings">Настройки</button>
+        <button class="tab" data-tab="stock">Распродажа и оверсток</button>
+        <button class="tab" data-tab="prices">Прайсы</button>
+        <button class="tab" data-tab="diagnose">Диагностика</button>
+      </nav>
+      <div class="spacer"></div>
+      <div class="hint">Программа работает, пока открыто чёрное окно запуска</div>
+    </div>
+  </header>
+
+  <main>
+    <!-- ======================= ОТЧЁТ ======================= -->
+    <section class="page" id="page-report">
+      <div class="modebar">
+        <div class="seg" id="ui-mode">
+          <button type="button" data-v="template">По шаблону</button>
+          <button type="button" data-v="custom">Индивидуально</button>
+        </div>
+        <button class="btn primary" id="rescan" type="button" title="Заново посмотреть папки. Файл читается снова, только если у него новее дата или другой размер.">Обновить данные</button>
+        <div class="muted" id="template-note"></div>
+      </div>
+      <details class="card folder-card" id="card-folder">
+        <summary class="card-head">
+          <h2>Папки с файлами</h2>
+          <span class="sub">Кроссы и прайсы общие. АЦПКД по категории — во «Входящие», свой файл группы важнее</span>
+        </summary>
+        <div id="dirs"></div>
+        <div class="row custom-only">
+          <input class="input" id="folder" style="flex:1; min-width:260px" spellcheck="false" placeholder="Путь к папке">
+          <button class="btn" id="pick-folder" type="button" title="Выбрать папку">Выбрать…</button>
+          <button class="btn" id="open-folder" type="button" title="Открыть папку в проводнике">Открыть</button>
+        </div>
+        <div id="docs" class="custom-only"></div>
+      </details>
+      <div id="scan-note"></div>
+
+      <div id="flow" class="workbench hidden">
+        <aside class="card queue" id="card-group">
+          <div class="seg" id="group-by">
+            <button type="button" data-v="bucket">По папке</button>
+            <button type="button" data-v="brand">По марке</button>
+          </div>
+          <input class="input" id="group-search" type="search" placeholder="Найти бренд или группу" autocomplete="off">
+          <div class="groups" id="groups"></div>
+          <div class="muted small-text" id="group-count"></div>
+        </aside>
+
+        <div class="stage">
+          <div class="context" id="context">
+            <div>
+              <div class="context-title" id="context-title">Группа не выбрана</div>
+              <div class="context-meta" id="context-meta"></div>
+            </div>
+            <div class="context-docs" id="context-docs"></div>
+            <div class="context-vr" id="context-vr"><div class="l">ВР</div><div class="v">—</div></div>
+          </div>
+          <div class="rates-k hidden"></div>
+          <div id="rates-note" class="hidden"></div>
+
+          <div class="card" id="card-preview">
+            <div class="card-head">
+              <h2>Аналитика</h2>
+              <span class="sub" id="preview-note">Цифры пересчитываются, когда меняете пороги рекомендаций</span>
+              <div class="seg" id="money-base">
+                <button type="button" data-v="sales">С продаж</button>
+                <button type="button" data-v="potential">С потенциала</button>
+              </div>
+            </div>
+            <div class="settings-block" id="card-recs">
+                <div class="card-head">
+                  <h3>Рекомендованные цены</h3>
+                  <span class="sub" id="rec-scope">Рекомендованные</span>
+                </div>
+                <div class="row" style="margin-bottom:8px">
+                  <div class="seg" id="rec-scope-mode">
+                    <button type="button" data-v="all">Одна на всех</button>
+                    <button type="button" data-v="group">У каждой группы своя</button>
+                  </div>
+                  <div class="seg" id="rec-source">
+                    <button type="button" data-v="mine">Мои</button>
+                    <button type="button" data-v="yours">Рекомендованные</button>
+                  </div>
+                </div>
+                <div class="row" style="margin-bottom:10px">
+                  <button class="btn small" id="rec-save" type="button">Сохранить мои</button>
+                  <button class="btn small ghost" id="rec-reset" type="button">Сбросить к рекомендованным</button>
+                  <button class="btn small ghost" id="rec-reset-all" type="button">Все группы к рекомендованным</button>
+                  <span class="muted small-text hidden" id="rec-dirty">Не сохранено</span>
+                </div>
+                <label class="check rec-toggle"><input type="checkbox" id="rec-enabled"> вставить рек. цены в отчёт</label>
+                <div class="filter" style="margin-top:12px">
+                  <div class="t">По кому ставить цель</div>
+                  <div class="seg" id="rec-target"></div>
+                  <div class="seg hidden" id="rec-all" style="margin-top:8px">
+                    <button type="button" data-v="avg">Среднее</button>
+                    <button type="button" data-v="min">Самая низкая</button>
+                  </div>
+                  <div class="muted small-text" id="rec-target-note"></div>
+                </div>
+                <div id="rec-body">
+                  <div class="rec-grid">
+                    <div class="filter">
+                      <div class="t">В пределах позиционирования, ±%</div>
+                      <input class="input num-input" id="rec-tolerance" type="number" min="0" max="30" step="0.5">
+                      <div class="muted small-text">Ближе к цели, чем на этот допуск, цену не трогаем</div>
+                    </div>
+                    <div class="filter">
+                      <div class="t">Не понижать больше, %</div>
+                      <input class="input num-input" id="rec-down" type="number" min="0" max="50" step="0.5">
+                    </div>
+                    <div class="filter">
+                      <div class="t">Минимальная ВР, %</div>
+                      <input class="input num-input" id="rec-vr" type="number" min="0" max="90" step="1">
+                    </div>
+                    <div class="filter">
+                      <div class="t">Округление Кат. А, руб.</div>
+                      <input class="input num-input" id="rec-round" type="number" min="0" max="100" step="1">
+                    </div>
+                    <div class="filter">
+                      <div class="t">Не повышать больше, % — по сегменту</div>
+                      <div class="up-grid" id="rec-up"></div>
+                    </div>
+                  </div>
+                  <div class="rec-grid rec-grid-2">
+                    <div class="filter">
+                      <div class="t">Топ продаж — первые % штук</div>
+                      <div class="row tight">
+                        <input class="input num-input" id="rec-top" type="number" min="10" max="90" step="5">
+                        <span class="muted">лимиты ×</span>
+                        <input class="input num-input" id="rec-top-k" type="number" min="0.1" max="1" step="0.05">
+                      </div>
+                    </div>
+                    <div class="filter">
+                      <div class="t">Середина — до % штук</div>
+                      <div class="row tight">
+                        <input class="input num-input" id="rec-mid" type="number" min="20" max="100" step="5">
+                        <span class="muted">лимиты ×</span>
+                        <input class="input num-input" id="rec-mid-k" type="number" min="0.1" max="1" step="0.05">
+                      </div>
+                    </div>
+                    <div class="filter">
+                      <div class="t">Заливка отклонения</div>
+                      <div class="seg" id="green-when">
+                        <button data-v="above">Зелёный — мы дороже</button>
+                        <button data-v="below">Зелёный — мы дешевле</button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+            </div>
+            <div id="dash"></div>
+            <div id="preview"></div>
+          </div>
+
+          <details class="card" id="group-settings">
+            <summary class="card-head">
+              <h2>Настройки этой группы</h2>
+              <span class="sub">Фильтры, кроссы и источники. Пороги рекомендаций — в аналитике выше</span>
+            </summary>
+            <div class="settings-body">
+              <div class="settings-block">
+                <h3>Подгруппы и вид отчёта</h3>
+                <div class="subgroups" id="subgroups"></div>
+                <div id="subgroup-mode-wrap" class="stack">
+                  <div class="seg" id="subgroup-mode">
+                    <button type="button" data-v="sheets">Лист на подгруппу</button>
+                    <button type="button" data-v="single">Все на одном листе</button>
+                  </div>
+                  <div class="muted small-text" id="subgroup-note"></div>
+                  <div id="pos-lines"></div>
+                </div>
+                <div class="seg" id="report-kind-main">
+                  <button type="button" data-v="full">Полный</button>
+                  <button type="button" data-v="quick">Быстрый</button>
+                </div>
+                <div class="muted small-text">Полный — все листы и формулы. Быстрый — дашборд и короткая таблица. Позиционирование в обоих случаях по подгруппе каждой строки.</div>
+                <div class="custom-only">
+                  <div class="seg" id="base">
+                    <button data-v="pst">ПСТ + СБС + Продажи</button>
+                    <button data-v="acp">АЦПКД + столбцы из ПСТ</button>
+                  </div>
+                  <div class="muted" id="base-note" style="font-size:12.5px; margin-top:5px"></div>
+                </div>
+              </div>
+
+              <div class="settings-block custom-only" id="card-filters">
+                <div class="card-head">
+                  <h3>Фильтры</h3>
+                  <div class="right">
+                    <button class="btn small ghost" id="preset-all">Показать всё</button>
+                    <button class="btn small ghost" id="preset-clean" title="Без NEW по типу ассортимента, оверстока, распродажи и вывода, товаров без МО и себестоимости">Чистый отчёт</button>
+                  </div>
+                </div>
+                <div class="filters" id="filters"></div>
+                <div class="muted small-text">Распродажа и вывод — один фильтр: тип ассортимента R, категория ABC D или столбец «Вывод из ассортимента». NEW — только тип ассортимента N, не категория ABC. Если распродажу скрыть, столбец «Вывод из ассорт.» в файл не пишется.</div>
+                <div class="filter" style="margin-top:14px">
+                  <div class="t">Категория ABC</div>
+                  <div class="row tight" id="abc"></div>
+                </div>
+                <div class="counter" id="counter"></div>
+              </div>
+
+              <div class="settings-block custom-only" id="card-prices">
+                <h3>Цены конкурентов</h3>
+                <div class="muted small-text">По каждому кроссу берётся минимальная цена среди поставщиков</div>
+                <div class="price-controls">
+                  <div class="filter">
+                    <div class="t">Откуда брать цены по кросс-артикулам</div>
+                    <div class="seg" id="price-source"></div>
+                    <div class="muted small-text" id="price-source-note"></div>
+                  </div>
+                  <div class="filter">
+                    <div class="t">Ограничения</div>
+                    <label class="check"><input type="checkbox" id="monitoring-only"> только поставщики из позиционирования (лист 02)</label>
+                    <label class="check"><input type="checkbox" id="in-stock-only"> только позиции в наличии</label>
+                    <div class="muted small-text" id="monitoring-note"></div>
+                  </div>
+                </div>
+                <div id="price-files"></div>
+              </div>
+
+              <div class="settings-block custom-only" id="card-crosses">
+                <div class="card-head">
+                  <h3>Кроссы</h3>
+                  <div class="right">
+                    <button class="btn small ghost" id="apply-suggest" title="Сбросить ручной выбор и взять рекомендованный режим везде">Вернуть подсказки</button>
+                  </div>
+                </div>
+                <div class="muted small-text">Конкуренты — из позиционирования. Для каждой части отчёта выберите, какие кроссы брать</div>
+                <div class="cross-toolbar">
+                  <div class="filter">
+                    <div class="t">Разбить аналитику</div>
+                    <div class="seg" id="cross-split"></div>
+                  </div>
+                  <div class="legend">
+                    <span><i class="sw yes"></i>есть «Да»</span>
+                    <span><i class="sw no"></i>только «Нет»</span>
+                    <span><i class="sw none"></i>без кроссов</span>
+                    <span class="muted">· число на кнопке — у скольких товаров будет цена</span>
+                  </div>
+                </div>
+                <div id="crosses"></div>
+              </div>
+
+              <div class="settings-block custom-only" id="card-sources">
+                <h3>Откуда брать данные</h3>
+                <div class="muted small-text">По каждому полю отдельно. Справа — насколько расходятся наши выгрузки и АЦПКД по товарам отчёта</div>
+                <div class="src-grid" id="sources"></div>
+              </div>
+
+            </div>
+          </details>
+
+          <div id="result"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ======================= НАСТРОЙКИ ======================= -->
+    <section class="page hidden" id="page-settings">
+      <div class="card">
+        <div class="card-head">
+          <h2>Справочники и параметры</h2>
+          <span class="sub" id="settings-state"></span>
+          <div class="right">
+            <span class="dirty hidden" id="settings-dirty">Есть несохранённые изменения</span>
+            <button class="btn" id="settings-import" title="Взять ГЗ и скидки из файлов в папке с выгрузками">Взять из папки</button>
+            <button class="btn danger" id="settings-reset">Вернуть зашитые</button>
+            <button class="btn primary" id="settings-save">Сохранить</button>
+          </div>
+        </div>
+        <div class="muted" style="font-size:13px">
+          Если в папке с выгрузками лежат файлы ГЗ или «Скидка для клиентов», для отчёта берутся они, иначе — значения отсюда.
+          Сохраняется в <span class="mono">Программа/настройки.json</span>.
+        </div>
+      </div>
+
+      <div class="grid-2">
+        <div class="card">
+          <div class="card-head"><h2>Курсы валют</h2><span class="sub">валюта берётся из столбца ПСТ «Закупочная цена / Вал.»; рубли — 1</span>
+            <div class="right"><button class="btn small" id="rate-add">Добавить валюту</button></div>
+          </div>
+          <div class="table-wrap"><table><thead><tr><th>Валюта (как в ПСТ)</th><th class="num">Курс, руб.</th><th></th></tr></thead><tbody id="rates"></tbody></table></div>
+        </div>
+        <div class="card">
+          <div class="card-head"><h2>Прочее</h2></div>
+          <div class="kv">
+            <div class="k">Подсказка по кроссам</div>
+            <div class="row">Добирать «Нет», если «Да» меньше чем у <input class="input num-input" id="threshold" type="number" min="0" max="100" step="5"> % товаров</div>
+            <div class="k">Папка для отчётов</div>
+            <div><input class="input" id="output" style="width:100%"></div>
+            <div class="k">После формирования</div>
+            <label class="check"><input type="checkbox" id="open-result"> открыть файл в Excel</label>
+          </div>
+        </div>
+      </div>
+
+      <div class="grid-2">
+        <div class="card">
+          <div class="card-head"><h2>ГЗ — коэффициенты</h2><span class="sub" id="gz-count"></span>
+            <div class="right"><input class="input" id="gz-search" placeholder="Поиск" style="width:160px"><button class="btn small" id="gz-add">Добавить</button></div>
+          </div>
+          <div class="table-wrap settings-table"><table><thead><tr><th>Группа заказа</th><th class="num">Коэф.</th><th></th></tr></thead><tbody id="gz"></tbody></table></div>
+        </div>
+        <div class="card">
+          <div class="card-head"><h2>Скидки для клиентов</h2><span class="sub" id="disc-count"></span>
+            <div class="right"><input class="input" id="disc-search" placeholder="Поиск" style="width:160px"><button class="btn small" id="disc-add">Добавить</button></div>
+          </div>
+          <div class="table-wrap settings-table"><table><thead><tr><th>Подгруппа</th><th>Группа заказа</th><th>ТМ</th><th class="num">Скидка, %</th><th></th></tr></thead><tbody id="discounts"></tbody></table></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <h2>Позиционирование</h2>
+          <span class="sub" id="pos-count"></span>
+          <div class="right"><input class="input" id="pos-search" placeholder="ТМ, подгруппа, конкурент" style="width:240px"><button class="btn small" id="pos-add" type="button">Добавить</button></div>
+        </div>
+        <div class="muted" style="font-size:13px; margin-bottom:10px">
+          Процент задаётся на подгруппу, не на всю группу. На одном листе строка дисков получает свой %, строка колодок — свой.
+          Пустой конкурент не участвует.
+        </div>
+        <div class="table-wrap settings-table"><table>
+          <thead><tr><th>ТМ</th><th>Группа</th><th>Подгруппа</th><th>Конкурент 1</th><th class="num">%</th><th>Конкурент 2</th><th class="num">%</th><th>Конкурент 3</th><th class="num">%</th><th></th></tr></thead>
+          <tbody id="positioning"></tbody>
+        </table></div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <h2>Марки и модели авто</h2>
+          <span class="sub" id="cars-count"></span>
+          <div class="right">
+            <input class="input" id="cars-search" placeholder="Марка, модель, как пишется" style="width:240px">
+            <button class="btn small" id="cars-add">Добавить</button>
+          </div>
+        </div>
+        <div class="muted" style="font-size:13px; margin-bottom:10px">
+          По столбцу «Разновидность» программа ставит автопарк и ценовой сегмент. Модель из цифр («3», «600») ищется только вместе с маркой.
+          Сегмент разновидности — самый высокий из найденных моделей: Land Cruiser поднимает строку в премиум, Гранта остаётся в бюджетном.
+        </div>
+        <div class="table-wrap settings-table"><table>
+          <thead><tr><th>Марка</th><th>Модель</th><th>Как пишется</th><th>Автопарк</th><th>Сегмент</th><th>Правый руль</th><th></th></tr></thead>
+          <tbody id="cars"></tbody>
+        </table></div>
+      </div>
+    </section>
+
+    <!-- ======================= ПРАЙСЫ ======================= -->
+    <section class="page hidden" id="page-prices">
+      <div class="card">
+        <div class="card-head">
+          <h2>Как распознались прайсы</h2>
+          <span class="sub">Папка внутри «Прайсы» — поставщик. Бренды — с листа 02 позиционирования</span>
+          <div class="right">
+            <button class="btn" id="px-rescan" type="button">Обновить данные</button>
+            <button class="btn primary" id="px-crosses" type="button">Выгрузка по кроссам</button>
+            <button class="btn" id="px-layout" type="button">Записать устройство</button>
+            <button class="btn" id="px-open" type="button">Открыть папку</button>
+          </div>
+        </div>
+        <div class="muted" style="font-size:13px; margin-bottom:12px">
+          Снимки для динамики: <b>Данные/Прайсы/12.10.2026/Armtek/файл.xlsx</b>. Файл <b>валюта</b> лежит прямо в «Прайсы»: в шапке даты, в строках USD, EUR, JPY. Без папки-даты поставщик по-прежнему <b>Данные/Прайсы/Armtek</b>.
+          Город по-прежнему из имени файла: TissEKB — Екатеринбург. Цена — столбец, где почти все значения числа и название не похоже на наименование. Ручная настройка одного файла применяется ко всем прайсам с теми же названиями столбцов. «Выгрузка по кроссам» собирает один файл: наш артикул, кросс и цена поставщика.
+        </div>
+        <div class="kpis wide" id="px-kpis"></div>
+        <div class="px-tools">
+          <input class="input" id="px-search" type="search" placeholder="Поставщик, файл, бренд, город" autocomplete="off">
+          <div class="seg" id="px-filter">
+            <button type="button" data-v="all">Все</button>
+            <button type="button" data-v="problem">С проблемой</button>
+            <button type="button" data-v="missing">Нет бренда</button>
+            <button type="button" data-v="nomon">Нет в мониторинге</button>
+            <button type="button" data-v="gap">Без прайса</button>
+          </div>
+        </div>
+      </div>
+      <div class="card" id="px-dynamics">
+        <div class="card-head">
+          <h2>Динамика и валюта</h2>
+          <span class="sub" id="px-dyn-cache"></span>
+          <div class="right"><button class="btn" id="px-dyn-export" type="button">Выгрузка для разбора</button></div>
+        </div>
+        <div class="muted" id="px-dyn-note" style="font-size:13px; margin-bottom:10px"></div>
+        <div class="px-tools">
+          <label class="muted">С <select id="px-dyn-from" class="input"></select></label>
+          <label class="muted">по <select id="px-dyn-to" class="input"></select></label>
+        </div>
+        <div id="px-dyn-rates" class="px-brands" style="margin:12px 0"></div>
+        <div id="px-dyn-summary" class="dyn-list"></div>
+        <details id="px-dyn-more">
+          <summary>Таблица по категориям, группам и подгруппам</summary>
+          <div class="px-tools" style="margin-top:10px">
+            <div class="seg" id="px-dyn-level">
+              <button type="button" data-v="all">Все</button>
+              <button type="button" data-v="category">Категории</button>
+              <button type="button" data-v="group">Группы</button>
+              <button type="button" data-v="subgroup">Подгруппы</button>
+            </div>
+            <input class="input" id="px-dyn-search" type="search" placeholder="Бренд, группа, категория" autocomplete="off">
+          </div>
+          <div id="px-dyn-body"></div>
+        </details>
+      </div>
+      <div id="px-list"></div>
+    </section>
+
+    <!-- ======================= ДИАГНОСТИКА ======================= -->
+    <section class="page hidden" id="page-diagnose">
+      <div class="card">
+        <div class="card-head">
+          <h2>Какая программа запущена</h2>
+          <span class="sub" id="diag-build"></span>
+          <div class="right">
+            <button class="btn" id="diag-refresh" type="button">Проверить снова</button>
+            <button class="btn" id="diag-write" type="button">Записать проверку в Результат</button>
+            <button class="btn" id="diag-open" type="button">Открыть папку</button>
+          </div>
+        </div>
+        <div class="muted" style="font-size:13px; margin-bottom:12px">
+          В шапке окна должно быть «сборка 13 окт, 5». Если этой надписи нет, открыта старая копия: закройте чёрное окно и запустите Запуск.bat из новой папки.
+        </div>
+        <div class="notes" id="diag-marks"></div>
+      </div>
+      <div class="card">
+        <div class="card-head">
+          <h2>Папка результата</h2>
+          <span class="sub">сюда же кладётся Разбор.txt, когда собирается отчёт</span>
+        </div>
+        <div class="mono" id="diag-output"></div>
+        <div id="diag-brief" style="margin-top:10px"></div>
+        <div id="diag-column" style="margin-top:10px"></div>
+        <div class="table-wrap" style="margin-top:12px"><table>
+          <thead><tr><th>Файл</th><th>Когда изменён</th><th class="num">Размер</th></tr></thead>
+          <tbody id="diag-files"></tbody>
+        </table></div>
+      </div>
+    </section>
+
+    <section class="page hidden" id="page-stock">
+      <div class="card">
+        <div class="card-head">
+          <h2>Распродажа и оверсток</h2>
+          <span class="sub">Свои настройки, основной отчёт они не меняют</span>
+        </div>
+        <div class="row" style="gap:18px; flex-wrap:wrap">
+          <div class="filter">
+            <div class="t">Что собрать</div>
+            <div class="seg" id="stock-slice">
+              <button type="button" data-v="sale">Распродажа</button>
+              <button type="button" data-v="overstock">Оверсток</button>
+              <button type="button" data-v="both">Оба</button>
+            </div>
+          </div>
+          <div class="filter" id="stock-edit-wrap">
+            <div class="t">Чьи настройки открыты</div>
+            <div class="seg" id="stock-edit">
+              <button type="button" data-v="sale">Распродажа</button>
+              <button type="button" data-v="overstock">Оверсток</button>
+            </div>
+          </div>
+        </div>
+        <div class="row" style="margin-top:14px">
+          <button class="btn primary" id="stock-build-all" type="button">Собрать все группы</button>
+        </div>
+        <div id="stock-result" style="margin-top:14px"></div>
+        <div id="stock-result" style="margin-top:14px"></div>
+      </div>
+
+      <div class="card" style="margin-top:14px">
+        <div class="card-head">
+          <h2>Вид и сумма</h2>
+        </div>
+        <div class="row" style="gap:18px; flex-wrap:wrap">
+          <div class="filter">
+            <div class="t">Вид отчёта</div>
+            <div class="seg" id="sk-kind">
+              <button type="button" data-v="full">Полный</button>
+              <button type="button" data-v="quick">Быстрый</button>
+            </div>
+          </div>
+          <div class="filter">
+            <div class="t">Сумма</div>
+            <div class="seg" id="sk-money">
+              <button type="button" data-v="sales">С продаж</button>
+              <button type="button" data-v="potential">С потенциала</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:14px">
+        <div class="card-head">
+          <h2>Рекомендованные цены</h2>
+          <span class="sub">Один набор на все группы этой выборки</span>
+        </div>
+        <label class="check"><input type="checkbox" id="sk-rec-enabled"> вставить рек. цены в отчёт</label>
+        <div class="filter" style="margin-top:12px">
+          <div class="t">По кому ставить цель</div>
+          <div class="seg" id="sk-target">
+            <button type="button" data-v="first">Только первый</button>
+            <button type="button" data-v="main">По списку</button>
+            <button type="button" data-v="all">Все с ценой</button>
+          </div>
+          <div class="seg" id="sk-target-all" style="margin-top:8px">
+            <button type="button" data-v="avg">Среднее</button>
+            <button type="button" data-v="min">Самая низкая</button>
+          </div>
+        </div>
+        <div class="rec-grid" style="margin-top:12px">
+          <div class="filter"><div class="t">В пределах позиционирования, ±%</div><input class="input num-input" id="sk-tolerance" type="number" min="0" max="30" step="0.5"></div>
+          <div class="filter"><div class="t">Не понижать больше, %</div><input class="input num-input" id="sk-down" type="number" min="0" max="50" step="0.5"></div>
+          <div class="filter"><div class="t">Минимальная ВР, %</div><input class="input num-input" id="sk-vr" type="number" min="0" max="90" step="1"></div>
+          <div class="filter"><div class="t">Округление Кат. А, руб.</div><input class="input num-input" id="sk-round" type="number" min="0" max="100" step="1"></div>
+          <div class="filter"><div class="t">Не повышать больше, % — по сегменту</div><div class="up-grid" id="sk-up"></div></div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:14px">
+        <div class="card-head"><h2>Фильтры</h2></div>
+        <div class="filters" id="sk-filters"></div>
+        <div class="filter" style="margin-top:14px">
+          <div class="t">Категория ABC</div>
+          <div class="row tight" id="sk-abc"></div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:14px">
+        <div class="card-head"><h2>Цены конкурентов</h2></div>
+        <div class="filter">
+          <div class="t">Откуда брать цены по кросс-артикулам</div>
+          <div class="seg" id="sk-price-source"></div>
+        </div>
+        <label class="check"><input type="checkbox" id="sk-monitoring"> только поставщики из позиционирования</label>
+        <label class="check"><input type="checkbox" id="sk-instock"> только позиции в наличии</label>
+      </div>
+
+      <div class="card" style="margin-top:14px">
+        <div class="card-head"><h2>Откуда брать данные</h2></div>
+        <div class="src-grid" id="sk-sources"></div>
+      </div>
+    </section>
+  </main>
+
+  <div class="actionbar" id="actionbar">
+    <div class="actionbar-inner">
+      <div class="summary" id="summary"><span>Выберите папку с выгрузками</span> <span class="muted" id="analyze-state"></span></div>
+      <div class="kind" title="Полный — отчёт и листы ПСТ, СБС, Продажи. Быстрый — короткий отчёт и те же выгрузки.">
+        <span>Вид</span>
+        <div class="seg" id="report-kind">
+          <button type="button" data-v="full">Полный</button>
+          <button type="button" data-v="quick">Быстрый</button>
+        </div>
+      </div>
+      <div class="spacer"></div>
+      <button class="btn" id="check-folder" title="Отдельный файл: что нашлось в папке и где расходятся ПСТ и АЦПКД">Проверка папки</button>
+      <button class="btn" id="build-all" disabled title="Отдельный файл на каждую группу, где нашлись ПСТ, СБС, Продажи и АЦПКД — неважно, в какой папке. Вид отчёта — как выбран сейчас.">Все группы</button>
+      <button class="btn primary big" id="build" disabled>Сформировать отчёт</button>
+    </div>
+  </div>
+  <div class="boot" id="boot">
+    <div class="boot-card">
+      <h2>Открываю программу</h2>
+      <div id="boot-stage">Жду ответ</div>
+      <div class="muted" id="boot-detail"></div>
+      <div class="muted" id="boot-time"></div>
+      <ol class="boot-log" id="boot-log"></ol>
+      <div class="note bad hidden" id="boot-error"></div>
+      <button class="btn" id="boot-retry" type="button" hidden>Повторить</button>
+    </div>
+  </div>
+  <div class="toasts" id="toasts"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>

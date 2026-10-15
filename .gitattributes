@@ -1,0 +1,5 @@
+*.bat text eol=crlf
+*.ini text eol=crlf
+*.py text eol=lf
+*.csv -text
+*.xlsx binary
