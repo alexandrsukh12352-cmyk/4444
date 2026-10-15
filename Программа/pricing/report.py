@@ -717,7 +717,8 @@ class PriceIndex:
     одного общего словаря.
     """
 
-    def __init__(self, src: Sources, opt: Options, price_files: list[PriceFile] | None = None, monitoring=None):
+    def __init__(self, src: Sources, opt: Options, price_files: list[PriceFile] | None = None, monitoring=None,
+                 brands=None):
         self.by_source: Counter = Counter()
         self.skipped_by_monitoring = 0
         self.skipped_low = 0
@@ -746,7 +747,7 @@ class PriceIndex:
                             self.by_source["АЦПКД"] += 1
         raw: dict[tuple[str, str], list[PriceOffer]] = {}
         if opt.price_source in ("prices", "both"):
-            clean = _file_offers_clean(price_files, monitoring or {}, opt.monitoring_only, in_stock)
+            clean = _file_offers_clean(price_files, monitoring or {}, opt.monitoring_only, in_stock, brands)
             raw, self._files = clean.raw, clean.kept
             self.skipped_by_monitoring += clean.skipped
             self.skipped_low += clean.low
@@ -819,50 +820,67 @@ def _cache_put(cache: OrderedDict, key: tuple, refs: tuple, value, limit: int) -
             cache.popitem(last=False)
 
 
-def _file_offer_part(price_files, monitoring, monitoring_only: bool, in_stock: bool):
+def _file_offer_part(price_files, monitoring, monitoring_only: bool, in_stock: bool, brands=None):
     """Цены из прайсов. Одинаковы для всех групп, поэтому считаются один раз на набор файлов.
 
     Ключ — сами файлы, а не список: список последней даты каждый раз новый.
+    brands — ключи брендов, по которым вообще ищут цену (конкуренты из позиционирования).
+    Цены остальных брендов в индекс не кладутся: их всё равно никто не спрашивает.
     """
+    offers, skipped, _other = _file_offer_part_ex(price_files, monitoring, monitoring_only, in_stock, brands)
+    return offers, skipped
+
+
+def _file_offer_part_ex(price_files, monitoring, monitoring_only: bool, in_stock: bool, brands=None):
     files = tuple(price_files or ())
-    key = ("raw", _files_key(price_files), id(monitoring), bool(monitoring_only), bool(in_stock))
+    brands = frozenset(brands) if brands is not None else None
+    key = ("raw", _files_key(price_files), id(monitoring), bool(monitoring_only), bool(in_stock), brands)
     refs = (*files, monitoring)
     hit = _cache_get(_FILE_OFFERS, key, refs)
     if hit is not None:
         return hit
     offers: dict[tuple[str, str], list[PriceOffer]] = {}
-    skipped = 0
+    skipped = other = 0
+    keys: dict[str, str] = {}  # бренд как в прайсе -> ключ бренда; брендов мало, строк много
     for pf in files:
         if not pf.enabled or pf.problem and not pf.offers:
             continue
         sk = supplier_key(pf.supplier)
+        label, source = pf.supplier_label, pf.sheet.file.name
         for o in pf.offers:
-            b = brand_key(o.brand)
+            b = keys.get(o.brand)
+            if b is None:
+                b = keys[o.brand] = brand_key(o.brand)
             allowed = monitoring.get(b)
             if monitoring_only and allowed and sk not in allowed:
                 skipped += 1
                 continue
             if in_stock and o.qty is not None and o.qty <= 0:
                 continue
+            if brands is not None and b not in brands:
+                other += 1
+                continue
             offers.setdefault((b, o.article_key or norm_article(o.article)), []).append(
-                PriceOffer(pf.supplier_label, o.price, o.qty, pf.sheet.file.name)
+                PriceOffer(label, o.price, o.qty, source)
             )
-    stored = (offers, skipped)
+    stored = (offers, skipped, other)
     _cache_put(_FILE_OFFERS, key, refs, stored, 8)
     return stored
 
 
-def _file_offers_clean(price_files, monitoring, monitoring_only: bool, in_stock: bool) -> _CleanOffers:
+def _file_offers_clean(price_files, monitoring, monitoring_only: bool, in_stock: bool, brands=None) -> _CleanOffers:
     """Цены прайсов после отсечения заглушек и выбросов — одни на все группы."""
     files = tuple(price_files or ())
-    key = ("clean", _files_key(price_files), id(monitoring), bool(monitoring_only), bool(in_stock))
+    brands = frozenset(brands) if brands is not None else None
+    key = ("clean", _files_key(price_files), id(monitoring), bool(monitoring_only), bool(in_stock), brands)
     refs = (*files, monitoring)
     hit = _cache_get(_FILE_OFFERS, key, refs)
     if hit is not None:
         return hit
-    raw, skipped = _file_offer_part(price_files, monitoring, monitoring_only, in_stock)
+    raw, skipped, other = _file_offer_part_ex(price_files, monitoring, monitoring_only, in_stock, brands)
     kept: dict[tuple[str, str], list[PriceOffer]] = {}
-    low = total = 0
+    low = 0
+    total = other  # «цен из прайсов» в окне — все строки, как раньше, хотя в индекс легли только конкуренты
     for k, offers in raw.items():
         total += len(offers)
         clean = without_anomalies(offers)
@@ -875,16 +893,35 @@ def _file_offers_clean(price_files, monitoring, monitoring_only: bool, in_stock:
     return stored
 
 
-def index_for(src: Sources, opt: Options, price_files: list[PriceFile] | None, monitoring) -> PriceIndex:
+def competitor_brand_keys(positioning) -> frozenset:
+    """Ключи всех брендов-конкурентов: лист мониторинга и конкуренты в строках позиционирования."""
+    cached = getattr(positioning, "_competitor_keys", None)
+    if cached is None:
+        found = {brand_key(b) for b in getattr(positioning, "monitoring", {}) or {}}
+        for row in getattr(positioning, "rows", None) or []:
+            for comp in getattr(row, "competitors", None) or []:
+                found.add(brand_key(getattr(comp, "name", "")))
+                found.add(brand_key(getattr(comp, "key", "")))
+        found.discard("")
+        cached = frozenset(found)
+        try:
+            positioning._competitor_keys = cached
+        except AttributeError:
+            pass
+    return cached
+
+
+def index_for(src: Sources, opt: Options, price_files: list[PriceFile] | None, monitoring, brands=None) -> PriceIndex:
+    brands = frozenset(brands) if brands is not None else None
     key = (
         id(src), _files_key(price_files), opt.price_source,
-        bool(opt.monitoring_only), bool(opt.in_stock_only), id(monitoring),
+        bool(opt.monitoring_only), bool(opt.in_stock_only), id(monitoring), brands,
     )
     refs = (src, *(price_files or ()), monitoring)
     hit = _cache_get(_INDEX_CACHE, key, refs)
     if hit is not None:
         return hit
-    index = PriceIndex(src, opt, price_files, monitoring)
+    index = PriceIndex(src, opt, price_files, monitoring, brands)
     _cache_put(_INDEX_CACHE, key, refs, index, 24)
     return index
 
@@ -1174,7 +1211,7 @@ def prepare(src: Sources, settings: Settings, opt: Options, price_files: list[Pr
     positioning = load_positioning(src, settings)
     rows = build_rows(src, settings, opt, positioning)
     kept, dropped = apply_filters(rows, opt)
-    index = index_for(src, opt, price_files, monitoring_map(positioning))
+    index = index_for(src, opt, price_files, monitoring_map(positioning), competitor_brand_keys(positioning))
     analysis = analyze_crosses(src, kept, opt, index)
     attach_crosses(src, kept, opt, index, suggestions_map(analysis))
     kept, dropped_price = apply_filters(kept, opt, with_prices=True)

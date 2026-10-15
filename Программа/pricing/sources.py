@@ -643,7 +643,10 @@ def _is_currency_file(path: Path) -> bool:
 
 
 def _price_sheets_of(f: Path) -> list[Sheet]:
-    return [s for s in read_sheets(f) if any(clean(v) for row in s.grid[:SCAN_PRICE_ROWS] for v in row)]
+    """Листы прайса без полной сетки в памяти: только начало (PriceSheet)."""
+    from .filecache import read_price_heads
+
+    return [s for s in read_price_heads(f) if any(clean(v) for row in s.grid[:SCAN_PRICE_ROWS] for v in row)]
 
 
 def _older_dates(files: list[Path], price_dirs: list[Path]) -> set[Path]:

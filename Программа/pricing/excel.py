@@ -26,6 +26,38 @@ class Sheet:
     def label(self) -> str:
         return f"{self.file.name} / {self.name}" if self.name else self.file.name
 
+    @property
+    def rows(self) -> int:
+        return len(self.grid or [])
+
+    def full_grid(self) -> list[list]:
+        return self.grid
+
+
+@dataclass(eq=False)
+class PriceSheet(Sheet):
+    """Лист прайса, от которого в памяти держится только начало.
+
+    Шапку, столбцы и примеры программа ищет в первых строках. Полный лист нужен,
+    только чтобы заново собрать цены (новый файл или новые столбцы) — тогда он
+    читается из кэша файла и сразу отпускается. Так прайсы на сотни тысяч строк
+    не занимают память и не поднимаются из кэша при каждом запуске.
+    """
+
+    total: int = 0  # строк в листе целиком
+    index: int = 0  # номер листа в книге
+
+    @property
+    def rows(self) -> int:
+        return self.total
+
+    def full_grid(self) -> list[list]:
+        if self.total <= len(self.grid):
+            return self.grid
+        from .filecache import read_full_uncached
+
+        return read_full_uncached(self.file)[self.index].grid
+
 
 @dataclass
 class Header:

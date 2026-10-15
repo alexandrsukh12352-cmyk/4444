@@ -428,7 +428,9 @@ def read_offers(pf: PriceFile) -> None:
     if not pf.header or not all(f in pf.cols for f in REQUIRED):
         return
     c = pf.cols
-    for i, row in enumerate(pf.header.data):
+    # Цены собираются по всему листу. У прайса в памяти только начало — полный лист берём из кэша.
+    data = pf.sheet.full_grid()[pf.header.row + pf.header.depth:]
+    for i, row in enumerate(data):
         art = clean(row[c["article"]]) if c["article"] < len(row) else ""
         price = num(row[c["price"]]) if c["price"] < len(row) else None
         key = norm_article(art)
@@ -905,7 +907,7 @@ def describe(pf: PriceFile, sample: int = 6) -> dict:
         "doubt": pf.doubt,
         "why": pf.why,
         "can_remember": can_remember(pf),
-        "rows": len(pf.sheet.grid),
+        "rows": pf.sheet.rows,
         "head_rows": [
             {"row": i + 1, "text": " · ".join(clean(v) for v in row if clean(v))[:160]}
             for i, row in enumerate(pf.sheet.grid[:SCAN_ROWS])

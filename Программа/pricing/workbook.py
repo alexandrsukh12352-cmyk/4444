@@ -140,6 +140,101 @@ def write_grid(ws, grid: list[list]) -> None:
                 cell.number_format = MONEY
 
 
+# ---------------------------------------------------------------- скрытые листы выгрузок: XML один раз
+
+
+@dataclass
+class RawTemplate:
+    """Готовый XML ячеек листа-выгрузки. Номера стилей заменены метками по порядку появления."""
+    sheet_data: str
+    dimension: str
+    probes: list[tuple[int, int]]  # первая ячейка каждого стиля — по ней узнаём номер стиля в книге
+
+
+_RAW_TEMPLATES: dict[int, tuple[list, RawTemplate]] = {}
+_STYLE_ATTR = re.compile(r'(<c r="[A-Z]+\d+") s="(\d+)"')
+_SHEET_DATA = re.compile(r"<sheetData\s*/>|<sheetData>.*</sheetData>", re.S)
+_DIMENSION = re.compile(r'<dimension ref="([^"]*)"\s*/>')
+_MARK = "\x00{}\x00"
+
+
+def raw_template(grid: list[list]) -> RawTemplate | None:
+    """XML листа-выгрузки, как его пишет openpyxl. Один раз на выгрузку за сеанс программы.
+
+    Общие ПСТ, СБС и Продажи одинаковы в файле каждой группы. Раньше каждая группа
+    заново создавала сотни тысяч ячеек; теперь лист пишется один раз, а в следующие
+    книги вставляется готовым. Содержимое и оформление листа те же.
+    """
+    hit = _RAW_TEMPLATES.get(id(grid))
+    if hit is not None and hit[0] is grid:
+        return hit[1]
+    try:
+        from io import BytesIO
+
+        from openpyxl import Workbook
+        from openpyxl.worksheet._writer import WorksheetWriter
+
+        scratch = Workbook()
+        ws = scratch.active
+        write_grid(ws, grid)
+        order: dict[int, int] = {}
+        probes: list[tuple[int, int]] = []
+        for (r, c), cell in sorted(ws._cells.items()):
+            if cell.has_style:
+                sid = cell.style_id
+                if sid not in order:
+                    order[sid] = len(order)
+                    probes.append((r, c))
+        writer = WorksheetWriter(ws, out=BytesIO())
+        writer.write()
+        xml = writer.read().decode("utf-8")
+        data = _SHEET_DATA.search(xml)
+        dim = _DIMENSION.search(xml)
+        if not data or not dim:
+            return None
+        body = _STYLE_ATTR.sub(lambda m: f'{m.group(1)} s="{_MARK.format(order[int(m.group(2))])}"', data.group(0))
+        tpl = RawTemplate(body, dim.group(1), probes)
+    except Exception:  # noqa: BLE001 — не вышло: лист пишется как раньше, по ячейкам
+        return None
+    _RAW_TEMPLATES[id(grid)] = (grid, tpl)
+    while len(_RAW_TEMPLATES) > 6:
+        _RAW_TEMPLATES.pop(next(iter(_RAW_TEMPLATES)))
+    return tpl
+
+
+def write_raw_sheet(ws, grid: list[list]) -> RawTemplate | None:
+    """Лист-выгрузка: в книгу ставятся только ячейки-образцы стилей, остальное вставится в XML после сохранения."""
+    tpl = raw_template(grid)
+    if tpl is None:
+        write_grid(ws, grid)
+        return None
+    ws.sheet_view.showGridLines = True
+    for r, c in tpl.probes:
+        value = grid[r - 1][c - 1]
+        cell = ws.cell(r, c, value)
+        if isinstance(value, float) and not isinstance(value, bool):
+            cell.number_format = MONEY
+    return tpl
+
+
+def _inject_raw(text: str, tpl: RawTemplate) -> str:
+    """Подставить готовые ячейки в XML листа. Номера стилей берутся у ячеек-образцов этой книги."""
+    ids = []
+    for r, c in tpl.probes:
+        coord = f"{get_column_letter(c)}{r}"
+        m = re.search(rf'<c r="{coord}" s="(\d+)"', text)
+        if not m:
+            raise ValueError(f"нет ячейки-образца {coord}")
+        ids.append(m.group(1))
+    body = tpl.sheet_data
+    for k, sid in enumerate(ids):
+        body = body.replace(_MARK.format(k), sid)
+    if "\x00" in body or not _SHEET_DATA.search(text):
+        raise ValueError("лист выгрузки не собрался")
+    text = _SHEET_DATA.sub(lambda _m: body, text, count=1)
+    return _DIMENSION.sub(lambda _m: f'<dimension ref="{tpl.dimension}" />', text, count=1)
+
+
 # ---------------------------------------------------------------- ссылки на справочники и цены
 
 
@@ -1019,13 +1114,49 @@ def _sanitize_sheet(blob: bytes) -> bytes:
     return _repair_sheet_xml(blob.decode("utf-8")).encode("utf-8")
 
 
-def _excel2016_stylesheet(path: Path) -> None:
-    """Дописать флаги стилей, без которых Excel 2016 не показывает оформление."""
+def _sheet_parts(blobs: dict) -> dict[str, str]:
+    """Имя листа -> файл листа внутри книги."""
+    import posixpath
+
+    book = blobs.get("xl/workbook.xml", b"").decode("utf-8")
+    rels = blobs.get("xl/_rels/workbook.xml.rels", b"").decode("utf-8")
+    targets = {}
+    for m in re.finditer(r"<Relationship\b[^>]*>", rels):
+        tag = m.group(0)
+        rid = re.search(r'Id="([^"]+)"', tag)
+        target = re.search(r'Target="([^"]+)"', tag)
+        if rid and target:
+            t = target.group(1)
+            targets[rid.group(1)] = t.lstrip("/") if t.startswith("/") else posixpath.normpath(posixpath.join("xl", t))
+    out = {}
+    for m in re.finditer(r"<sheet\b[^>]*>", book):
+        tag = m.group(0)
+        name = re.search(r'name="([^"]*)"', tag)
+        rid = re.search(r'r:id="([^"]+)"|\bid="([^"]+)"', tag)
+        if name and rid:
+            from xml.sax.saxutils import unescape
+
+            out[unescape(name.group(1), {"&quot;": '"', "&apos;": "'"})] = targets.get(rid.group(1) or rid.group(2), "")
+    return out
+
+
+def _excel2016_stylesheet(path: Path, raw_sheets: dict | None = None) -> None:
+    """Дописать флаги стилей, без которых Excel 2016 не показывает оформление.
+
+    raw_sheets — листы-выгрузки, ячейки которых вставляются готовым XML (write_raw_sheet).
+    """
     import zipfile
     from io import BytesIO
 
     src = zipfile.ZipFile(path)
     blobs = {item.filename: src.read(item.filename) for item in src.infolist()}
+    if raw_sheets:
+        parts = _sheet_parts(blobs)
+        for title, tpl in raw_sheets.items():
+            part = parts.get(title)
+            if not part or part not in blobs:
+                raise ValueError(f"не найден лист «{title}» в книге")
+            blobs[part] = _inject_raw(blobs[part].decode("utf-8"), tpl).encode("utf-8")
     shared_xml = blobs.get("xl/sharedStrings.xml", b"").decode("utf-8")
     shared = re.findall(r"<t[^>]*>([^<]*)</t>", shared_xml)
     out = BytesIO()
@@ -1107,12 +1238,15 @@ def build_report(src: Sources, settings: Settings, opt: Options, out_dir: Path,
     used: set[str] = set()
     live = Live()
     export_sheets = []
+    raw_sheets: dict[str, RawTemplate] = {}
     for kind, sheet_name in (("pst", "ПСТ"), ("sbs", "СБС"), ("sales", "Продажи")):
         loc = src.located(kind)
         if not loc:
             continue
         export = wb.create_sheet(sheet_title(sheet_name, used))
-        write_grid(export, loc.header.sheet.grid)
+        tpl = write_raw_sheet(export, loc.header.sheet.grid)
+        if tpl is not None:
+            raw_sheets[export.title] = tpl
         setattr(live, kind, loc)
         live.names[kind] = export.title
         export_sheets.append(export)
@@ -1153,7 +1287,7 @@ def build_report(src: Sources, settings: Settings, opt: Options, out_dir: Path,
     from .brief import write_group_brief
     brief_dir = slice_output(out_dir, opt) or out_dir
     brief = write_group_brief(brief_dir, kept, opt, src)
-    _excel2016_stylesheet(path)
+    _excel2016_stylesheet(path, raw_sheets)
     return BuildResult(path, len(kept), [ws.title for ws in wb.worksheets], len(prep.dropped),
                        priced, opt.report_kind, brief)
 

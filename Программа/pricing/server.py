@@ -706,6 +706,7 @@ def _annotate_queue(folder: Path, settings: Settings, queue: list[dict], ws: Wor
         host.acp = acp
     index = report.PriceIndex(
         host, report.Options(price_source="both"), files, report.monitoring_map(positioning),
+        report.competitor_brand_keys(positioning),
     )
     stored = []
     for g in queue:

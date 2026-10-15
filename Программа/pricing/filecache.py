@@ -14,13 +14,15 @@ import pickle
 import threading
 from pathlib import Path
 
-from .excel import read_sheets
+from .excel import PriceSheet, read_sheets
 
 CACHE_VERSION = 3
 # Общий файл рабочей области версии 3 хранил сетки всех прайсов и подвешивал запуск.
 # Версия 5: прайсы прошлых дат в рабочую область не читаются (src.dormant_prices).
-# Старая версия 4 держала их все — её не берём, рабочая область соберётся из кэша файлов.
-WORKSPACE_VERSION = 5
+# Версия 6: от прайса в рабочей области только начало листа (PriceSheet), без полной сетки.
+WORKSPACE_VERSION = 6
+# Сколько строк прайса держится в памяти: шапка ищется в первых 60, столбцы проверяются по 300.
+HEAD_ROWS = 400
 CACHE_DIR = Path(__file__).resolve().parent.parent / "кэш"
 _lock = threading.Lock()
 _memory: dict[tuple, list] = {}
@@ -73,6 +75,75 @@ def read_sheets_cached(path: Path) -> list:
     return sheets
 
 
+def read_full_uncached(path: Path) -> list:
+    """Полная сетка из кэша файла (или из Excel), не оставляя её в памяти программы."""
+    global misses
+    st = path.stat()
+    key = (str(path.resolve()), st.st_mtime_ns, st.st_size)
+    with _lock:
+        cached = _memory.get(key)
+    if cached is not None:
+        return cached
+    slot = _slot(path, st.st_mtime_ns, st.st_size)
+    if slot.is_file():
+        try:
+            with slot.open("rb") as fh:
+                sheets = pickle.load(fh)
+            if isinstance(sheets, list):
+                return sheets
+        except (OSError, pickle.PickleError, EOFError, AttributeError, ValueError):
+            pass
+    with _lock:
+        misses += 1
+    sheets = read_sheets(path)
+    _store(slot, sheets)
+    return sheets
+
+
+def _store(slot: Path, data) -> None:
+    try:
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = slot.with_suffix(".tmp")
+        with tmp.open("wb") as fh:
+            pickle.dump(data, fh, protocol=pickle.HIGHEST_PROTOCOL)
+        tmp.replace(slot)
+    except OSError:
+        pass
+
+
+_heads: dict[tuple, list] = {}
+
+
+def _head_slot(path: Path, mtime_ns: int, size: int) -> Path:
+    raw = f"head|{CACHE_VERSION}|{HEAD_ROWS}|{path.resolve()}|{mtime_ns}|{size}".encode()
+    return CACHE_DIR / f"head-{hashlib.sha1(raw).hexdigest()}.pkl"
+
+
+def read_price_heads(path: Path) -> list[PriceSheet]:
+    """Листы прайса: первые HEAD_ROWS строк и размер листа. Полная сетка остаётся в кэше на диске."""
+    st = path.stat()
+    key = (str(path.resolve()), st.st_mtime_ns, st.st_size)
+    with _lock:
+        hit = _heads.get(key)
+    if hit is None:
+        slot = _head_slot(path, st.st_mtime_ns, st.st_size)
+        if slot.is_file():
+            try:
+                with slot.open("rb") as fh:
+                    hit = pickle.load(fh)
+                if not isinstance(hit, list):
+                    hit = None
+            except (OSError, pickle.PickleError, EOFError, AttributeError, ValueError):
+                hit = None
+        if hit is None:
+            full = read_full_uncached(path)
+            hit = [(s.name, len(s.grid), s.grid[:HEAD_ROWS]) for s in full]
+            _store(slot, hit)
+        with _lock:
+            _heads[key] = hit
+    return [PriceSheet(path, name, list(head), total=total, index=i) for i, (name, total, head) in enumerate(hit)]
+
+
 def _signature_rows(signature: tuple) -> list:
     return [[path, mtime, size] for path, mtime, size in signature]
 
@@ -114,6 +185,8 @@ def _iter_sheets(workspace):
 def _strip_grids(workspace) -> list:
     saved = []
     for sheet in _iter_sheets(workspace):
+        if isinstance(sheet, PriceSheet):
+            continue  # начало прайса маленькое — хранится в рабочей области как есть
         saved.append((sheet, sheet.grid))
         sheet.grid = None
     return saved
