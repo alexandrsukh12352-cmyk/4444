@@ -17,7 +17,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import bootlog, check, crossdump, dynamics, filecache, insight, price_analytics, price_check, prices, report
+from . import bootlog, check, crossdump, dynamics, filecache, insight, price_analytics, price_check, pricearchive, prices, report
 from .cars import SEGMENTS, UNKNOWN, load_default as cars_default
 from .dashboard import summary as dashboard_summary
 from .excel import clean, num
@@ -347,7 +347,7 @@ def price_payload(src: Sources, settings: Settings) -> list[dict]:
     positioning = report.load_positioning(src, settings)
     payload = [describe_price(pf, positioning) for pf in files]
     try:
-        notes, info = price_check.quality_split(files, dynamics.competitor_brand_names(positioning))
+        notes, info = price_check.quality_split(files, dynamics.competitor_brand_names(positioning), cross_keys(src)[1])
     except Exception:  # noqa: BLE001 — проверка не должна ронять список прайсов
         notes, info = {}, {}
     payload = [dict(item) for item in payload]
@@ -1057,6 +1057,48 @@ def api_progress(_body: dict) -> dict:
     return bootlog.snapshot()
 
 
+RATE_GAP = 0.03  # курс в настройках расходится с файлом «валюта» больше чем на 3% — сказать
+RATE_AGE_DAYS = 30
+
+
+def rates_check(folder: Path, settings: Settings) -> list[dict]:
+    """Курсы в настройках против файла «валюта» в прайсах и давность последней правки курсов.
+
+    По курсу считаются закупка в рублях и СБС план. Старый курс — ВР «по плану» неверная.
+    """
+    notes: list[dict] = []
+    ours = {clean(k).upper(): v for k, v in (settings.data.get("currency_rates") or {}).items() if v not in ("", None)}
+    try:
+        cur = dynamics.read_currency(folder)
+    except Exception:  # noqa: BLE001 — проверка не должна мешать
+        cur = {"rates": {}}
+    for code, by_date in (cur.get("rates") or {}).items():
+        mine = ours.get(code.upper())
+        if not mine or not by_date:
+            continue
+        date = max(by_date, key=prices._shot_sort)
+        value = by_date[date]
+        ratio = value / mine
+        if 50 < ratio < 200:  # в файле за 100 единиц (иена у ЦБ)
+            value, ratio = value / 100, ratio / 100
+        elif 0.005 < ratio < 0.02:
+            value, ratio = value * 100, ratio * 100
+        if abs(ratio - 1) > RATE_GAP:
+            notes.append({"currency": code, "ours": mine, "file": round(value, 4), "date": date, "gap": ratio - 1,
+                          "text": f"Курс {code} в настройках {mine:g}, в файле «валюта» на {date} — {value:.4g} "
+                                  f"({(ratio - 1) * 100:+.0f}%). Закупка в рублях и СБС план считаются по старому курсу."})
+    saved = settings.data.get("currency_rates_date")
+    if saved:
+        try:
+            age = (dt.date.today() - dt.date.fromisoformat(saved)).days
+        except ValueError:
+            age = 0
+        if age > RATE_AGE_DAYS and ours:
+            notes.append({"currency": "", "age": age,
+                          "text": f"Курсы валют в настройках не меняли {age} дн. (с {dt.date.fromisoformat(saved):%d.%m.%Y}). Проверьте, что они актуальны."})
+    return notes
+
+
 def api_scan(body: dict) -> dict:
     bootlog.begin("scan")
     try:
@@ -1121,6 +1163,8 @@ def _api_scan_body(body: dict) -> dict:
         "reread": filecache.misses,
         "monitoring_suppliers": report.monitoring_suppliers(report.load_positioning(src, settings)),
         "brand_hints": brand_hints_payload(src, settings),
+        "rates_check": rates_check(folder, settings),
+        "price_archive": pricearchive.preview(folder) if _workspace_root(folder) else None,
         "brand_aliases": settings.brand_aliases,
         "brand_ignore": settings.options.get("brand_ignore") or [],
         "price_waiting": _waiting_prices(src),
@@ -1242,6 +1286,7 @@ def api_analyze(body: dict) -> dict:
         "screened": insight.excluded_counts(final),
         "screen": insight.screen_options(settings),
         "history": insight.history_for(opt.brand, opt.group),
+        "losses": insight.loss_reasons(prep, files),
     }
 
 
@@ -1632,6 +1677,8 @@ def _price_scope(body: dict, settings: Settings):
     src, woke = _all_dates_sources(body, settings)
     bootlog.step("Обновляю список прайсов", "уже разобранные файлы берутся из кэша")
     files = STATE.price_files(src, settings)
+    # даты, сжатые в архив, — к динамике; дата, которая есть файлами, из архива не берётся
+    files = files + pricearchive.archived_files(folder, {pf.shot_date for pf in files if pf.shot_date})
     positioning = report.load_positioning(src, settings)
     names = {prices.brand_key(n): n for n in dynamics.competitor_brand_names(positioning)}
     for key, label in dynamics._brand_names(files).items():
@@ -1723,6 +1770,33 @@ def api_prices_dynamics_export(body: dict) -> dict:
     return {**info, "path": str(path.resolve()), "folder": str(out.resolve())}
 
 
+def api_prices_compact(body: dict) -> dict:
+    """Сжать прайсы старше двух недель. dry — только посчитать, что сожмётся."""
+    settings = Settings.load()
+    folder = resolve_folder(body.get("folder"), settings)
+    if body.get("dry", True):
+        return pricearchive.preview(folder)
+    return _with_boot("compact", _prices_compact, body)
+
+
+def _prices_compact(body: dict) -> dict:
+    settings = Settings.load()
+    folder = resolve_folder(body.get("folder"), settings)
+    bootlog.step("Читаю прайсы прошлых дат", "для архива нужны цены из старых файлов")
+    src, _ = _all_dates_sources(body, settings)
+    files = STATE.price_files(src, settings)
+    positioning = report.load_positioning(src, settings)
+    keep = {prices.brand_key(n) for n in dynamics.competitor_brand_names(positioning)} | set(cross_keys(src)[0])
+    keep.discard("")
+    bootlog.step("Сжимаю", "пишу архив и переношу исходники")
+    result = pricearchive.compact(folder, files, keep)
+    with STATE.lock:
+        STATE.workspace_cache = None
+        STATE.cache.clear()
+        STATE.price_shared.clear()
+    return result
+
+
 def api_prices_forget(body: dict) -> dict:
     settings = Settings.load()
     settings.data["price_profiles"] = {}
@@ -1809,6 +1883,8 @@ def api_settings_save(body: dict) -> dict:
             if clean(k):
                 value = num(v)
                 rates[clean(k).upper()] = value if value is not None else ""
+        if rates != (s.data.get("currency_rates") or {}):
+            s.data["currency_rates_date"] = dt.date.today().isoformat()
         s.data["currency_rates"] = rates
     if "gz" in body:
         s.data["gz"] = [[clean(n), float(c)] for n, c in body["gz"] if clean(n) and c not in ("", None)]
@@ -1998,6 +2074,7 @@ ROUTES = {
     "/api/prices/dynamics": api_prices_dynamics,
     "/api/prices/dynamics-export": api_prices_dynamics_export,
     "/api/prices/forget": api_prices_forget,
+    "/api/prices/compact": api_prices_compact,
     "/api/open": api_open,
     "/api/pick-folder": api_pick_folder,
     "/api/settings": api_settings_get,

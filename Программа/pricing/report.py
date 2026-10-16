@@ -1238,6 +1238,8 @@ class Prepared:
     index: PriceIndex
     positioning: object
     screened: dict = field(default_factory=dict)  # причина отсева -> сколько пар
+    losses_since: str = ""  # самопроверка: дата прошлого прогона с теми же настройками цен
+    losses: list = field(default_factory=list)  # у каких товаров с тех пор пропала цена конкурента
 
 
 def rows_for_workbook(prep: Prepared, src: Sources, opt: Options) -> list[Row]:
@@ -1266,14 +1268,23 @@ def prepare(src: Sources, settings: Settings, opt: Options, price_files: list[Pr
 
         if opt.history_write:
             try:
-                observe(kept)
+                observe(kept, period=getattr(src, "sales3_period", "") or "")
             except Exception:  # noqa: BLE001 — история не должна мешать отчёту
                 pass
         annotate(kept, opt.recs.cooldown)
     apply_recommendations(kept, opt)
     kept.sort(key=lambda r: (-(r.sales_qty or 0), -(r.sales or 0), r.article))
     apply_sisters(kept, src)
-    return Prepared(rows, kept, dropped + dropped_price, analysis, index, positioning, dict(screened))
+    prep = Prepared(rows, kept, dropped + dropped_price, analysis, index, positioning, dict(screened))
+    if opt.history and opt.history_write:
+        try:
+            from .pricehistory import priced_key, track_priced
+
+            # с учётом и отсеянных фильтром «только с ценой»: пропавшая цена тоже убирает строку
+            prep.losses_since, prep.losses = track_priced(priced_key(opt), kept + [r for r, _ in dropped_price])
+        except Exception:  # noqa: BLE001 — самопроверка не должна мешать отчёту
+            pass
+    return prep
 
 
 def _subgroup_in_positioning(positioning, brand: str, group: str, subgroup: str) -> bool:

@@ -114,6 +114,11 @@ def crossed_rows(pf: PriceFile, allowed: set, pairs: set, scope: str) -> dict:
 # ---------------------------------------------------------------- панель: ячейка -> цена по датам
 
 
+def file_name(pf: PriceFile) -> str:
+    """Имя файла прайса; у даты из архива — как файл назывался до сжатия."""
+    return getattr(pf, "source_name", "") or pf.sheet.file.name
+
+
 def _city(pf: PriceFile) -> str:
     return clean(pf.city) or "—"
 
@@ -142,7 +147,7 @@ def build_panel(files: list[PriceFile], allowed: set, pairs: set, names: dict[st
         suppliers.setdefault(sup, pf.supplier or "—")
         city = _city(pf)
         rows = crossed_rows(pf, allowed, pairs, scope)
-        shots.append({"date": date, "supplier": sup, "city": city, "file": pf.sheet.file.name, "rows": len(rows),
+        shots.append({"date": date, "supplier": sup, "city": city, "file": file_name(pf), "rows": len(rows),
                       "offers": len(pf.offers)})
         for (bk, ak), (price, *_rest) in rows.items():
             bucket = cells[(sup, city, bk, ak)]
@@ -456,14 +461,14 @@ def write_export(path: Path, files: list[PriceFile], panel: dict, crosses: dict,
 
     def rows():
         order = sorted((pf for pf in files if pf.enabled and (pf.shot_date or "без даты") in dates),
-                       key=lambda pf: (dynamics._date_key(pf.shot_date or "без даты"), pf.supplier, _city(pf), pf.sheet.file.name))
+                       key=lambda pf: (dynamics._date_key(pf.shot_date or "без даты"), pf.supplier, _city(pf), file_name(pf)))
         for pf in order:
             date = pf.shot_date or "без даты"
             day = _date_obj(date) or date
             sup = supplier_key(pf.supplier) or "—"
             city = _city(pf)
             found = crossed_rows(pf, allowed, pairs, scope) if pairs else {}
-            meta.append([day, pf.supplier, city, pf.sheet.file.name, pf.sheet.name, pf.status, len(pf.offers), len(found),
+            meta.append([day, pf.supplier, city, file_name(pf), pf.sheet.name, pf.status, len(pf.offers), len(found),
                          "; ".join(pf.notes) or pf.problem or ""])
             di = dates.index(date)
             for (bk, ak), (price, qty, row, brand_raw, art_raw) in sorted(found.items(), key=lambda kv: kv[1][2]):
@@ -477,7 +482,7 @@ def write_export(path: Path, files: list[PriceFile], panel: dict, crosses: dict,
                 for n, (own_brand, own_key, yes) in enumerate(links):
                     item = items.get((own_brand, own_key))
                     yield [
-                        day, pf.supplier, city, pf.sheet.file.name, row, brand_raw, names.get(bk, bk), art_raw, ak,
+                        day, pf.supplier, city, file_name(pf), row, brand_raw, names.get(bk, bk), art_raw, ak,
                         price, qty, (_date_obj(prev_date) or prev_date) if prev_date else None, prev, change,
                         (item.brand if item else own_brand), (item.article if item else own_key),
                         (clean(item.code) if item else ""), (clean(item.name) if item else ""),
@@ -519,7 +524,7 @@ def write_export(path: Path, files: list[PriceFile], panel: dict, crosses: dict,
         for _pf, row, brand_raw, art_raw, price in sorted(group, key=lambda x: x[1]):
             line = grid[row - 1] if 0 < row <= len(grid) else []
             text = " | ".join(clean(v) for v in line if clean(v))
-            check.append([pf.shot_date, pf.supplier, _city(pf), pf.sheet.file.name, row, brand_raw, art_raw, price, text])
+            check.append([pf.shot_date, pf.supplier, _city(pf), file_name(pf), row, brand_raw, art_raw, price, text])
     out_sheets.append({
         "name": "Проверка",
         "header": ["Дата", "Поставщик", "Город", "Файл", "Строка", "Бренд", "Артикул", "Цена", "Строка файла целиком"],

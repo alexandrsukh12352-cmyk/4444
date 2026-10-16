@@ -77,9 +77,14 @@ def _ru(day: dt.date) -> str:
     return day.strftime("%d.%m.%Y")
 
 
-def observe(rows, today: dt.date | None = None, path: Path | None = None) -> int:
-    """Сравнивает МО (или Кат. А, если МО нет) с прошлым разом. Возвращает, сколько цен изменилось."""
+def observe(rows, today: dt.date | None = None, path: Path | None = None, period: str = "") -> int:
+    """Сравнивает МО (или Кат. А, если МО нет) с прошлым разом. Возвращает, сколько цен изменилось.
+
+    period — период выгрузки «Продажи за 3 месяца» из её шапки. Снимок продаж привязан к нему:
+    тот же файл, перезаписанный тем же периодом, дубля не даёт; новый период — новая точка.
+    """
     today = today or dt.date.today()
+    stamp = period or today.isoformat()
     data = load(path)
     prices, changes, recs = data["prices"], data["changes"], data["recs"]
     found = dirty = 0
@@ -104,7 +109,7 @@ def observe(rows, today: dt.date | None = None, path: Path | None = None) -> int
         sales3 = getattr(r, "sales3", None)
         if sales3 is not None:
             qty = getattr(r, "sales3_qty", None)
-            point = [today.isoformat(), qty if qty is not None else None, sales3]
+            point = [stamp, qty if qty is not None else None, sales3]
             series = data["sales"].get(code) or []
             if not series or series[-1][0] != point[0]:
                 data["sales"][code] = (series + [point])[-KEEP_SALES:]
@@ -172,3 +177,61 @@ def annotate(rows, cooldown_days: float = 90, today: dt.date | None = None, path
                         f"ждём, как ответят продажи")
             frozen += 1
     return frozen
+
+
+# ---------------------------------------------------------------- самопроверка: пропавшие цены
+
+KEEP_PRICED = 200  # сколько снимков «группа + настройки цен» держим
+
+
+def priced_key(opt) -> str:
+    """Снимок сравнивается только с прогоном при тех же настройках цен — иначе потери мнимые."""
+    modes = json.dumps(getattr(opt, "cross_modes", {}) or {}, sort_keys=True, ensure_ascii=False)
+    return "|".join(str(x) for x in (opt.brand, opt.group, opt.price_source, opt.price_pick, opt.monitoring_only,
+                                       opt.in_stock_only, opt.cross_split, getattr(opt, "stock_slice", ""), modes))
+
+
+def track_priced(key: str, rows, today: dt.date | None = None, path: Path | None = None) -> tuple[str, list[dict]]:
+    """Запоминает, у каких товаров была цена конкурента, и возвращает потери с прошлого дня прогона.
+
+    (дата прошлого снимка, [{code, comp, price, supplier}]). Товар, которого нет в отчёте сейчас
+    (ушёл фильтром или из ПСТ), потерей кросса не считается.
+    """
+    today = today or dt.date.today()
+    data = load(path)
+    store = data.setdefault("priced", {})
+    now: dict[str, dict] = {}
+    for r in rows:
+        got = {}
+        for comp, price in (getattr(r, "prices", None) or {}).items():
+            if price:
+                best = (getattr(r, "best", None) or {}).get(comp)
+                got[comp] = [round(float(price), 2), getattr(best, "supplier", "") if best else ""]
+        if got:
+            now[str(r.code)] = got
+    entry = store.get(key) or {}
+    last = entry.get("last")
+    prev = last if last and last.get("date") != today.isoformat() else entry.get("prev")
+    losses: list[dict] = []
+    if prev:
+        by_code = {str(r.code): r for r in rows}
+        for code, comps in (prev.get("items") or {}).items():
+            row = by_code.get(code)
+            if row is None:
+                continue
+            for comp, (price, supplier) in comps.items():
+                if not (getattr(row, "prices", None) or {}).get(comp):
+                    losses.append({"code": code, "comp": comp, "price": price, "supplier": supplier})
+    if last and last.get("date") == today.isoformat():
+        # тот же день: цена, которая была хоть в одном прогоне за день, остаётся в снимке —
+        # иначе потеря посреди дня не всплывёт завтра
+        merged = {code: dict(comps) for code, comps in (last.get("items") or {}).items()}
+        for code, comps in now.items():
+            merged.setdefault(code, {}).update(comps)
+        now = merged
+    store[key] = {"last": {"date": today.isoformat(), "items": now}, "prev": prev}
+    if len(store) > KEEP_PRICED:
+        for old in sorted(store, key=lambda k: (store[k].get("last") or {}).get("date", ""))[: len(store) - KEEP_PRICED]:
+            store.pop(old, None)
+    save(data, path)
+    return (prev or {}).get("date", ""), losses

@@ -16,6 +16,7 @@ from difflib import SequenceMatcher
 
 from . import prices
 from .prices import PriceFile, brand_key, raw_brand_key, supplier_key
+from .sources import norm_article
 
 STATS_NAME = "price_stats.json"
 STATS_VERSION = 1
@@ -113,6 +114,70 @@ def brand_hints(files: list[PriceFile], competitor_names: list[str], crosses: di
         })
         if len(out) >= limit:
             break
+    seen_raw = {raw_brand_key(h["brand"]) for h in out}
+    for hint in article_hints(files, targets, crosses, ignore):
+        if raw_brand_key(hint["brand"]) not in seen_raw and len(out) < limit:
+            out.append(hint)
+    return out
+
+
+MIN_ARTICLE_HITS = 5
+
+
+def article_hints(files: list[PriceFile], targets: dict, crosses: dict | None, ignore: set) -> list[dict]:
+    """Самопроверка кроссов: артикул кросса конкурента есть в прайсе, но под другим брендом.
+
+    Похожесть написания тут не нужна: «Ate» против «Continental Teves» по буквам не похож, а по
+    артикулам совпадает. Предлагаем, только если таких артикулов не меньше пяти и под брендом
+    конкурента их в прайсах нет совсем — иначе это случайное совпадение номеров.
+    """
+    if not crosses:
+        return []
+    wanted: dict[str, set] = defaultdict(set)
+    for groups in crosses.values():
+        for rows in groups.values():
+            for row in rows:
+                bk = brand_key(row.cross_brand)
+                if bk in targets and row.cross_key:
+                    wanted[row.cross_key].add(bk)
+    if not wanted:
+        return []
+    found: set = set()
+    other: dict[tuple[str, str], set] = defaultdict(set)
+    names: dict[str, str] = {}
+    where: dict[str, set] = defaultdict(set)
+    keys: dict[str, str] = {}
+    for pf in files:
+        if not pf.enabled:
+            continue
+        for o in pf.offers:
+            ak = o.article_key or norm_article(o.article)
+            want = wanted.get(ak)
+            if not want:
+                continue
+            bk = keys.get(o.brand)
+            if bk is None:
+                bk = keys[o.brand] = brand_key(o.brand)
+            if bk in want:
+                found.add((bk, ak))
+                continue
+            raw = raw_brand_key(o.brand)
+            if not raw or raw in ignore:
+                continue
+            names.setdefault(raw, str(o.brand).strip())
+            where[raw].add(pf.supplier)
+            for target in want:
+                other[(raw, target)].add(ak)
+    out = []
+    for (raw, target), arts in other.items():
+        lost = {ak for ak in arts if (target, ak) not in found}
+        if len(lost) < MIN_ARTICLE_HITS or not prices._brand_like(names[raw]):
+            continue
+        out.append({
+            "brand": names[raw], "rows": len(lost), "where": sorted(where[raw]), "suggest": targets[target],
+            "score": 1.0, "why": f"{len(lost)} артикулов кроссов {targets[target]} есть в прайсах только под этим брендом",
+        })
+    out.sort(key=lambda h: -h["rows"])
     return out
 
 
@@ -137,30 +202,39 @@ def _group_key(pf: PriceFile) -> str:
     return f"{supplier_key(pf.supplier)}|{(pf.city or '').lower()}"
 
 
-def _summary(files: list[PriceFile], competitor_keys: set[str]) -> dict:
+def _summary(files: list[PriceFile], competitor_keys: set[str], pairs: set | None = None) -> dict:
     offers = 0
     by_brand: dict[str, list[float]] = defaultdict(list)
+    matched: set = set()
+    keys: dict[str, str] = {}
     for pf in files:
         offers += len(pf.offers)
         for o in pf.offers:
-            key = brand_key(o.brand)
+            key = keys.get(o.brand)
+            if key is None:
+                key = keys[o.brand] = brand_key(o.brand)
             if key in competitor_keys and o.price:
                 by_brand[key].append(o.price)
+                if pairs:
+                    pair = (key, o.article_key or norm_article(o.article))
+                    if pair in pairs:
+                        matched.add(pair)
     return {
         "offers": offers,
         "brands": {k: [len(v), statistics.median(v)] for k, v in by_brand.items()},
+        "matched": len(matched) if pairs else None,  # сколько разных артикулов наших кроссов нашлось
     }
 
 
 _SUMS: dict = {}  # (группа, дата, бренды) -> (файлы, сводка): та же группа файлов не пересчитывается
 
 
-def _cached_summary(gkey: str, date: str, part: list[PriceFile], competitor_keys: set[str]) -> dict:
-    token = (gkey, date, tuple(sorted(competitor_keys)))
+def _cached_summary(gkey: str, date: str, part: list[PriceFile], competitor_keys: set[str], pairs: set | None = None) -> dict:
+    token = (gkey, date, tuple(sorted(competitor_keys)), len(pairs or ()))
     held = _SUMS.get(token)
     if held is not None and len(held[0]) == len(part) and all(a is b for a, b in zip(held[0], part)):
         return held[1]
-    summary = _summary(part, competitor_keys)
+    summary = _summary(part, competitor_keys, pairs)
     _SUMS[token] = (list(part), summary)
     return summary
 
@@ -168,18 +242,18 @@ def _cached_summary(gkey: str, date: str, part: list[PriceFile], competitor_keys
 INFO_PREFIXES = ("цен меньше", "пропал бренд")
 
 
-def quality_split(files: list[PriceFile], competitor_names: list[str]) -> tuple[dict, dict]:
+def quality_split(files: list[PriceFile], competitor_names: list[str], pairs: set | None = None) -> tuple[dict, dict]:
     """(замечания, справки). «Цен меньше» и «пропал бренд» — справка: так бывает, когда в этот день
     у поставщика и города меньше файлов. «Медиана цены ушла» — замечание: похоже, столбец не тот."""
     warn: dict[str, list[str]] = {}
     info: dict[str, list[str]] = {}
-    for ident, notes in quality_notes(files, competitor_names).items():
+    for ident, notes in quality_notes(files, competitor_names, pairs).items():
         for text in notes:
             (info if text.startswith(INFO_PREFIXES) else warn).setdefault(ident, []).append(text)
     return warn, info
 
 
-def quality_notes(files: list[PriceFile], competitor_names: list[str]) -> dict[str, list[str]]:
+def quality_notes(files: list[PriceFile], competitor_names: list[str], pairs: set | None = None) -> dict[str, list[str]]:
     """id файла -> замечания по сравнению с прошлой датой того же поставщика и города.
 
     Сильно меньше цен, пропал бренд-конкурент, медиана цены бренда сдвинулась больше чем
@@ -194,7 +268,7 @@ def quality_notes(files: list[PriceFile], competitor_names: list[str]) -> dict[s
             current[(_group_key(pf), pf.shot_date)].append(pf)
     changed = False
     for (gkey, date), part in current.items():
-        summary = _cached_summary(gkey, date, part, competitor_keys)
+        summary = _cached_summary(gkey, date, part, competitor_keys, pairs)
         if groups.setdefault(gkey, {}).get(date) != summary:
             groups[gkey][date] = summary
             changed = True
@@ -215,6 +289,11 @@ def quality_notes(files: list[PriceFile], competitor_names: list[str]) -> dict[s
         prev_date = max(earlier, key=prices._shot_sort)
         prev, now = history[prev_date], history[date]
         found = []
+        m_prev, m_now = prev.get("matched"), now.get("matched")
+        if m_prev and m_now is not None and m_prev >= 30 and m_now < m_prev * 0.7:
+            # самопроверка кроссов: у этого поставщика нашлось заметно меньше наших кросс-артикулов
+            found.append(f"с нашими кроссами совпало {m_now:,} артикулов против {m_prev:,} на {prev_date} — "
+                         f"проверьте файл: столбцы, лист, бренды".replace(",", " "))
         if prev["offers"] >= 100 and now["offers"] < prev["offers"] * 0.6:
             found.append(f"цен меньше, чем {prev_date}: {now['offers']:,} против {prev['offers']:,}".replace(",", " "))
         for key, (n_prev, med_prev) in prev["brands"].items():

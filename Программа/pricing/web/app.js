@@ -1261,6 +1261,7 @@ function renderPriceAudit() {
     return;
   }
   renderCalendar(files, waiting);
+  renderArchive();
   const latest = latestPriceDate(files);
   const latestFiles = latest ? files.filter((f) => !f.date || f.date === latest) : files;
   const latestGroups = new Map(priceGroups(latestFiles, monBy).map((g) => [g.key, g]));
@@ -1942,6 +1943,42 @@ async function writePriceExport() {
   }
 }
 
+function renderArchive() {
+  const a = (S.scan && S.scan.price_archive) || null;
+  const btn = $("#px-compact");
+  const note = $("#px-archive");
+  if (!btn || !note) return;
+  const n = a && a.dates ? a.dates.length : 0;
+  btn.classList.toggle("hidden", !n);
+  if (n) btn.textContent = `Сжать старые даты · ${fmtInt(n)}`;
+  const kept = a && a.archived ? a.archived.length : 0;
+  note.classList.toggle("hidden", !kept && !n);
+  note.textContent = [
+    kept ? `В архиве ${fmtInt(kept)} ${plural(kept, "дата", "даты", "дат")} (с ${a.archived[0]} по ${a.archived[kept - 1]}): цены конкурентов из них видны в динамике на вкладке «Прайсы».` : "",
+    n ? `${fmtInt(n)} ${plural(n, "дата", "даты", "дат")} старше ${a.keep_days} дней можно сжать: ${fmtInt(a.files)} файлов, ${(a.bytes / 1048576).toFixed(0)} МБ.` : "",
+  ].filter(Boolean).join(" ");
+  btn.onclick = compactPrices;
+}
+
+async function compactPrices() {
+  const a = (S.scan && S.scan.price_archive) || {};
+  const n = (a.dates || []).length;
+  if (!n) return;
+  const text = `Сжать ${n} ${plural(n, "дату", "даты", "дат")} (${a.dates[0]} — ${a.dates[n - 1]}), ${a.files} файлов, ${(a.bytes / 1048576).toFixed(0)} МБ?\n\n`
+    + "Цены брендов конкурентов из них останутся в «Данные/Архив цен» и будут видны в динамике. "
+    + "Папки этих дат переедут в «Данные/Прайсы — исходники» — программа их больше не читает, удалить их можно руками.";
+  if (!window.confirm(text)) return;
+  showBoot("Сжимаю старые даты прайсов");
+  try {
+    const r = await api("/api/prices/compact", { folder: S.folder, dry: false });
+    hideBoot();
+    toast(`Сжато ${fmtInt(r.dates.length)} ${plural(r.dates.length, "дата", "даты", "дат")}: ${(r.bytes_before / 1048576).toFixed(0)} МБ файлов → ${(r.bytes_archive / 1048576).toFixed(1)} МБ архива`, "good");
+    rescan(true);
+  } catch (e) {
+    showBootError(e.message);
+  }
+}
+
 async function writeCrossPrices() {
   const btn = $("#px-crosses");
   if (btn) btn.disabled = true;
@@ -1985,11 +2022,14 @@ function allMissingRates() {
 
 function renderRatesNote() {
   const missing = allMissingRates();
-  $("#rates-note").classList.toggle("hidden", !missing.length);
-  document.querySelector(".rates-k").classList.toggle("hidden", !missing.length);
-  if (!missing.length) return;
+  const stale = (S.scan && S.scan.rates_check) || [];
+  const show = missing.length || stale.length;
+  $("#rates-note").classList.toggle("hidden", !show);
+  document.querySelector(".rates-k").classList.toggle("hidden", !show);
+  if (!show) return;
   const list = missing.map((m) => `<b>${esc(m.currency)}</b> <span class="muted">(${fmtInt(m.items)} тов.)</span>`).join(", ");
-  $("#rates-note").innerHTML = `<div class="note">Нет курса для ${list}. Это по всем группам, не только по открытой. Без курса не посчитаются закупка в рублях, СБС план и цена смежной марки.
+  $("#rates-note").innerHTML = `<div class="note">${missing.length ? `Нет курса для ${list}. Это по всем группам, не только по открытой. Без курса не посчитаются закупка в рублях, СБС план и цена смежной марки.` : ""}
+    ${stale.map((x) => `<div>${esc(x.text)}</div>`).join("")}
     <button class="btn small ghost" id="goto-rates">Задать курсы</button></div>`;
   $("#goto-rates").onclick = () => showTab("settings");
 }
@@ -2290,6 +2330,8 @@ function attention(d) {
   if (dn && dn.items && dn.need_lift != null && dn.need_lift > 0.15) {
     out.push({ kind: "dn", text: `Снижения (${fmtInt(dn.items)} тов.) окупятся только при росте их продаж на ${fmtPct(dn.need_lift)}.` });
   }
+  const lo = (S.analysis && S.analysis.losses) || {};
+  if (lo.count) out.push({ kind: "warn", text: `С ${isoDate(lo.since)} пропала цена конкурента у ${fmtInt(lo.count)} ${plural(lo.count, "пары", "пар", "пар")} товар–конкурент — список и причины во вкладке «Почему мало цен».` });
   if (d.frozen) out.push({ kind: "info", text: `${fmtInt(d.frozen)} ${plural(d.frozen, "товар", "товара", "товаров")} на паузе: цену в ПСТ меняли недавно, ждём, как ответят продажи.` });
   if (d.rec_enabled && d.idle) {
     out.push({ kind: "info", text: `${fmtInt(d.idle)} ${plural(d.idle, "товар", "товара", "товаров")} без продаж${d.recent_sales ? " за 3 месяца" : ""} — цену не поднимаем${d.idle_down ? `; ${fmtInt(d.idle_down)} с остатком дороже цели — снижаем` : ""}.` });
@@ -2446,6 +2488,16 @@ function renderCoverage() {
       <td class="num">${x.with_target ? `${fmtInt(x.in_band)} из ${fmtInt(x.with_target)}` : "—"}</td>
       <td class="num">${fmtPct(x.median, true)}</td><td class="num">${fmtPct(x.weighted, true)}</td><td class="num">${fmtPct(x.vr)}</td>
     </tr>`).join("")}</tbody></table></div></details>` : "";
+  const lo = a.losses || {};
+  const lossTitles = { cross: "кросс пропал из базы", file: "нет прайса поставщика", article: "артикула нет в прайсах",
+    screened: "отсеяно как несопоставимое", off: "кросс выключен", other: "не взята" };
+  const lostBox = lo.count ? `<div class="why-box lost-box"><div class="dash-title">Самопроверка: с ${esc(isoDate(lo.since))} пропала цена у ${fmtInt(lo.count)} ${plural(lo.count, "пары", "пар", "пар")} товар–конкурент</div>
+      <div class="px-brands">${Object.entries(lo.by_kind || {}).sort((x, y) => y[1] - x[1]).map(([k, n]) => `<span class="tag">${esc(lossTitles[k] || k)} — ${fmtInt(n)}</span>`).join(" ")}</div>
+      <div class="table-wrap scroll"><table class="mini"><thead><tr><th>Артикул</th><th>Конкурент</th><th class="num">Была цена</th><th>Поставщик</th><th>Почему пропала</th></tr></thead><tbody>
+      ${(lo.items || []).slice(0, 40).map((x) => `<tr><td class="nowrap"><b>${esc(x.article)}</b></td><td>${esc(x.comp)}</td>
+        <td class="num">${fmtMoney(x.price)}</td><td class="muted">${esc(x.supplier || "")}</td><td>${esc(x.why)}</td></tr>`).join("")}
+      </tbody></table></div></div>`
+    : (lo.since ? `<div class="note info">Самопроверка: с ${esc(isoDate(lo.since))} ни одна цена конкурента не пропала.</div>` : "");
   el.innerHTML = `
     <div class="card-head"><h2>Почему мало цен</h2><span class="sub">путь от товара до цены конкурента: на каком шаге теряются позиции</span>
       <div class="right"><button class="btn small" id="gaps-export" type="button">Выгрузить дыры в кроссах</button></div></div>
@@ -2455,6 +2507,7 @@ function renderCoverage() {
       ${tile("Есть в прайсах", fmtInt(total.in_prices), `${pct(total.in_prices, total.yes)}% кроссов «Да»`)}
       ${tile("Цен в отчёте", fmtInt(total.final), `${pct(total.final, total.items)}% пар`)}
     </div>
+    ${lostBox}
     ${why}
     <div class="fn-grid">${cards}</div>
     <div class="row tight" style="flex-wrap:wrap; gap:12px; margin:12px 0 4px">
@@ -2523,7 +2576,7 @@ function renderBrandHints() {
       <div class="table-wrap"><table class="mini"><thead><tr>
       <th></th><th>Как написано</th><th class="num">Строк</th><th>Где</th><th>Похож на</th><th></th></tr></thead><tbody>
       ${hints.map((h, i) => `<tr><td><input type="checkbox" data-pick="${i}" ${S.hintPick[h.brand] ? "checked" : ""}></td>
-        <td><b>${esc(h.brand)}</b></td><td class="num">${fmtInt(h.rows)}</td>
+        <td><b>${esc(h.brand)}</b>${h.why ? `<div class="muted small-text">${esc(h.why)}</div>` : ""}</td><td class="num">${fmtInt(h.rows)}</td>
         <td class="muted">${esc((h.where || []).join(", "))}</td><td>${esc(h.suggest)}</td>
         <td class="nowrap"><button type="button" class="btn small" data-alias="${i}">Считать как ${esc(h.suggest)}</button>
           <button type="button" class="btn small ghost" data-ignore="${i}">Не тот бренд</button></td></tr>`).join("")}

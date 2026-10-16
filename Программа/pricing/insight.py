@@ -381,3 +381,46 @@ def history_for(brand: str, group: str, limit: int = 12, path: Path | None = Non
              if norm_text(h.get("brand", "")) == b and norm_text(h.get("group", "")) == g and not h.get("slice")]
     found.sort(key=lambda h: h.get("date", ""))
     return found[-limit:]
+
+
+# ---------------------------------------------------------------- самопроверка: почему пропала цена
+
+
+def loss_reasons(prep, price_files) -> dict:
+    """Товары, у которых с прошлого прогона пропала цена конкурента, и почему.
+
+    Причины по шагам: кросса нет в базе → прайса поставщика нет на последнюю дату → артикул
+    не нашёлся в прайсах → цена отсеяна как несопоставимая.
+    """
+    losses = getattr(prep, "losses", None) or []
+    rows = {str(r.code): r for r in [*prep.kept, *(r for r, _ in prep.dropped)]}
+    loaded = {supplier_key(pf.supplier) for pf in price_files or [] if pf.enabled and pf.offers}
+    items = []
+    reasons: Counter = Counter()
+    for loss in losses:
+        r = rows.get(loss["code"])
+        if r is None:
+            continue
+        comp = loss["comp"]
+        name = next((c.name for c in r.competitors if c.key == comp), comp)
+        supplier = loss.get("supplier") or ""
+        base = supplier.split(" · ")[0]
+        picks = (getattr(r, "picks", None) or {}).get(comp)
+        excluded = (getattr(r, "excluded", None) or {}).get(comp)
+        if comp not in (getattr(r, "picks", None) or {}):
+            why, kind = "кросс на этого конкурента выключен в настройках", "off"
+        elif not picks:
+            why, kind = "кросса больше нет в базе кроссов", "cross"
+        elif excluded:
+            why, kind = f"цена отсеяна: {excluded.get('reason', '')}".rstrip(": "), "screened"
+        elif base and supplier_key(base) not in loaded:
+            why, kind = f"нет прайса {base} на последнюю дату", "file"
+        elif not any(p.offers for p in picks):
+            why, kind = (f"артикула кросса больше нет в прайсах" + (f" (был у {base})" if base else "")), "article"
+        else:
+            why, kind = "цена есть, но не взята — проверьте настройки цен", "other"
+        reasons[kind] += 1
+        items.append({"code": r.code, "article": r.article, "name": r.name, "comp": name, "price": loss.get("price"),
+                      "supplier": supplier, "why": why, "kind": kind, "sales": r.sales or 0})
+    items.sort(key=lambda x: -(x["sales"] or 0))
+    return {"since": getattr(prep, "losses_since", ""), "count": len(items), "by_kind": dict(reasons), "items": items[:200]}

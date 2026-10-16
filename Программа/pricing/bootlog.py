@@ -20,12 +20,14 @@ PHASES = {
     "groups": "Группы, кроссы и цены",
     "analytics": "Расчёт изменений цен",
     "export": "Запись книги Excel",
+    "compact": "Архив старых дат",
 }
 PLANS = {
     "scan": ["folder", "files", "prices", "groups"],
     "prices": ["files", "prices"],
     "analytics": ["files", "prices", "analytics"],
     "export": ["files", "prices", "export"],
+    "compact": ["files", "prices", "compact"],
 }
 _STAGE_PHASE = {
     "Папка": "folder", "Кэш": "folder", "Чтение папок": "files", "Читаю файл": "files",
@@ -33,7 +35,7 @@ _STAGE_PHASE = {
     "Настройки прайсов": "prices", "Ищу шапку из настроек": "prices", "Столбцы поставщика": "prices",
     "Разбираю прайс": "prices", "Сохраняю столбцы": "prices", "Обновляю список прайсов": "prices",
     "Прайсы": "groups", "Кроссы": "groups", "Отчёт": "groups",
-    "Считаю изменения": "analytics", "Пишу Excel": "export",
+    "Считаю изменения": "analytics", "Пишу Excel": "export", "Сжимаю": "compact",
 }
 _PROGRESS = re.compile(r"^(\d+) из (\d+)")
 
