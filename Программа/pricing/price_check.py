@@ -122,14 +122,17 @@ def brand_hints(files: list[PriceFile], competitor_names: list[str], crosses: di
 
 
 MIN_ARTICLE_HITS = 5
+MIN_SHARE_OF_MISSING = 0.1  # совпало хотя бы 10% кроссов конкурента, не найденных под его именем
+MIN_SHARE_OF_BRAND = 0.05  # и это хотя бы 5% строк самого бренда в прайсах
 
 
 def article_hints(files: list[PriceFile], targets: dict, crosses: dict | None, ignore: set) -> list[dict]:
     """Самопроверка кроссов: артикул кросса конкурента есть в прайсе, но под другим брендом.
 
     Похожесть написания тут не нужна: «Ate» против «Continental Teves» по буквам не похож, а по
-    артикулам совпадает. Предлагаем, только если таких артикулов не меньше пяти и под брендом
-    конкурента их в прайсах нет совсем — иначе это случайное совпадение номеров.
+    артикулам совпадает. Номера у разных производителей часто совпадают случайно, поэтому
+    предлагаем, только если совпадений не меньше пяти, они покрывают хотя бы десятую часть
+    ненайденных кроссов конкурента и составляют заметную долю строк самого бренда.
     """
     if not crosses:
         return []
@@ -168,10 +171,31 @@ def article_hints(files: list[PriceFile], targets: dict, crosses: dict | None, i
             where[raw].add(pf.supplier)
             for target in want:
                 other[(raw, target)].add(ak)
+    # Строк каждого бренда в прайсах: у настоящего синонима заметная часть его строк — артикулы
+    # конкурента; у MAHLE или TOYOTA совпали 5–8 номеров из тысяч — это случайность.
+    rows_of: Counter = Counter()
+    for pf in files:
+        if not pf.enabled:
+            continue
+        local = pf.__dict__.get("_brand_counts")
+        if local is None:
+            local = pf.__dict__["_brand_counts"] = Counter(o.brand for o in pf.offers)
+        for brand, n in local.items():
+            raw = raw_brand_key(brand)
+            if raw:
+                rows_of[raw] += n
+    per_target: Counter = Counter()
+    for ak, want in wanted.items():
+        for t in want:
+            per_target[t] += 1
+    found_of: Counter = Counter(t for t, _ in found)
     out = []
     for (raw, target), arts in other.items():
         lost = {ak for ak in arts if (target, ak) not in found}
-        if len(lost) < MIN_ARTICLE_HITS or not prices._brand_like(names[raw]):
+        missing = per_target[target] - found_of[target]  # кроссов конкурента, не найденных под его именем
+        if len(lost) < max(MIN_ARTICLE_HITS, MIN_SHARE_OF_MISSING * missing) or not prices._brand_like(names[raw]):
+            continue
+        if rows_of[raw] and len(lost) / rows_of[raw] < MIN_SHARE_OF_BRAND:
             continue
         out.append({
             "brand": names[raw], "rows": len(lost), "where": sorted(where[raw]), "suggest": targets[target],

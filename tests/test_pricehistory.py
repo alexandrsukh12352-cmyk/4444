@@ -76,6 +76,12 @@ def test_cross_articles_under_another_brand_are_suggested():
     crosses = {("ADVICS", f"A{i}"): {"ATE": [CrossRow(a, norm_article(a), "ATE", True)]} for i, a in enumerate(arts)}
     hints = article_hints([pf], {"ATE": "ATE"}, crosses, set())
     assert hints and hints[0]["brand"] == "Continental Teves" and hints[0]["suggest"] == "ATE" and hints[0]["rows"] == 6
+    # случайное совпадение номеров: 8 артикулов LYNX среди тысячи строк MAHLE — не синоним
+    lynx = [f"LF{i:04d}" for i in range(80)]
+    mahle = NS(enabled=True, supplier="Берг", offers=[Offer("MAHLE", f"OC{i}", 500.0, 1, i) for i in range(1000)]
+               + [Offer("MAHLE", a, 500.0, 1, 2000 + i) for i, a in enumerate(lynx[:8])])
+    lynx_crosses = {("AVANTECH", f"F{i}"): {"LYNX": [CrossRow(a, norm_article(a), "LYNX", True)]} for i, a in enumerate(lynx)}
+    assert article_hints([mahle], {"LYNX": "LYNXAUTO"}, lynx_crosses, set()) == []
     # если под брендом ATE эти артикулы в прайсах тоже есть — это не потеря
     pf.offers += [Offer("ATE", a, 900.0, 1, 10 + i) for i, a in enumerate(arts)]
     assert article_hints([pf], {"ATE": "ATE"}, crosses, set()) == []

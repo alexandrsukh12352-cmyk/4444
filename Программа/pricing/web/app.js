@@ -2595,7 +2595,12 @@ function renderBrandHints() {
   const all = $("#hint-all");
   if (all) all.onchange = () => { hints.forEach((h) => (S.hintPick[h.brand] = all.checked)); renderBrandHints(); };
   const apply = $("#hint-apply");
-  if (apply) apply.onclick = () => saveAlias({ add_many: picked.map((h) => [h.brand, h.suggest]) });
+  if (apply) apply.onclick = () => {
+    // Склейка брендов меняет цены во всех отчётах — пачкой только после явного подтверждения.
+    const list = picked.slice(0, 12).map((h) => `${h.brand} → ${h.suggest}`).join("\n");
+    if (!window.confirm(`Считать ${picked.length} ${plural(picked.length, "бренд", "бренда", "брендов")} как конкурентов?\n\n${list}${picked.length > 12 ? "\n…" : ""}`)) return;
+    saveAlias({ add_many: picked.map((h) => [h.brand, h.suggest]) });
+  };
   const ignore = $("#hint-ignore");
   if (ignore) ignore.onclick = () => saveAlias({ ignore_many: picked.map((h) => h.brand) });
   el.querySelectorAll("[data-alias]").forEach((b) => (b.onclick = () => {
