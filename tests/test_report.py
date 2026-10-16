@@ -472,3 +472,16 @@ def test_server_endpoints(tmp_path, monkeypatch):
 def test_old_quick_and_acp_options_read_as_full_report_from_pst():
     opt = R.Options.from_dict({"report_kind": "quick", "base": "acp"})
     assert (opt.report_kind, opt.base) == ("full", "pst")
+
+
+def test_competitor_price_can_be_the_second_or_the_median_supplier():
+    from types import SimpleNamespace as O
+
+    offers = [O(supplier="Armtek · Омск", price=100), O(supplier="Armtek · Барнаул", price=120),
+              O(supplier="Berg", price=130), O(supplier="Rossko", price=150), O(supplier="TISS", price=200)]
+    assert R.pick_offer(offers, "min").price == 100
+    # Склады Armtek — один поставщик: вторая снизу — Berg, медиана из 4 поставщиков — нижняя средняя (Berg).
+    assert R.pick_offer(offers, "second").price == 130
+    assert R.pick_offer(offers, "median").price == 130
+    assert R.pick_offer(offers[:2], "median").price == 100
+    assert R.Options.from_dict({"price_pick": "чушь"}).price_pick == "min"

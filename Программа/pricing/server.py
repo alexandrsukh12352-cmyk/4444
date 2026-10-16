@@ -632,7 +632,7 @@ def _missing_phrase(parts: list[str]) -> str:
     return "нет " + ", ".join(parts[:-1]) + " и " + parts[-1]
 
 
-REC_FIELDS = ("tolerance", "down", "min_vr", "top_share", "mid_share", "top_factor", "mid_factor", "rounding")
+REC_FIELDS = ("tolerance", "down", "min_vr", "top_share", "mid_share", "top_factor", "mid_factor", "rounding", "max_lift")
 
 
 def rec_group_key(brand: str, group: str) -> str:
@@ -1015,6 +1015,7 @@ def api_init(_body: dict) -> dict:
         "cross_mode_hints": report.CROSS_MODE_HINTS,
         "cross_splits": report.CROSS_SPLITS,
         "price_sources": report.PRICE_SOURCES,
+        "price_picks": report.PRICE_PICKS,
         "price_fields": prices.FIELDS,
         "abc_values": report.ABC_VALUES,
         "report_kinds": report.REPORT_KINDS,

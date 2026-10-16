@@ -20,7 +20,7 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from . import style
 from .cars import SEGMENTS, UNKNOWN
 from .report import ABC_ORDER, PRICE_SOURCES, REPORT_KINDS, SUBGROUP_MODES, Options, Row, competitor_order
-from .recommend import TARGETS
+from .recommend import TARGETS, sales_weight
 
 NUM = ">-1E+99"  # условие SUMIFS / COUNTIFS «ячейка — число»
 CARD_FILL = PatternFill("solid", fgColor="F3F7F8")
@@ -130,8 +130,10 @@ class Slice:
 
 
 def deviation_slices(rows: list[Row], rec_enabled: bool) -> list[Slice]:
+    weight = sales_weight(rows)
+
     def gaps(rs, attr="gap"):
-        pairs = [(getattr(r, attr), r.sales_qty or 0) for r in rs if getattr(r, attr) is not None]
+        pairs = [(getattr(r, attr), weight(r)) for r in rs if getattr(r, attr) is not None]
         return describe([g for g, _ in pairs], [w for _, w in pairs])
 
     result = [Slice("Все товары с целью", "all", gaps(rows))]
@@ -145,10 +147,13 @@ def deviation_slices(rows: list[Row], rec_enabled: bool) -> list[Slice]:
             price = r.prices.get(c.key)
             if not (r.cat_a and price):
                 continue
-            now.append((1 - r.cat_a / price, r.sales_qty or 0))
+            now.append((1 - r.cat_a / price, weight(r)))
             if rec_enabled and r.rec and r.rec.price:
-                after.append((1 - r.rec.price / price, r.sales_qty or 0))
+                after.append((1 - r.rec.price / price, weight(r)))
         stats = describe([v for v, _ in now], [w for _, w in now])
+        pcts = [r.percents.get(c.key) for r in rows if r.prices.get(c.key) and r.percents.get(c.key) is not None]
+        if pcts:
+            stats["target_dev"] = -statistics.median(pcts) / 100  # где цель в тех же единицах: «−5%» → мы дешевле на 5%
         if after:
             rec_stats = describe([v for v, _ in after], [w for _, w in after])
             stats["mean_rec"] = rec_stats.get("mean")
@@ -224,8 +229,79 @@ def summary(rows: list[Row], opt: Options) -> dict:
     }
     result["change_hist"] = _change_hist(rows) if ro.enabled else None
     result["limits"] = _limits(rows) if ro.enabled else None
+    result["position"] = _position(rows, tol, ro.enabled, basis)
+    result["bridge"] = _bridge(rows, basis) if ro.enabled else None
+    result["weight_by"] = "qty" if any((r.sales_qty or 0) > 0 for r in rows) else "rub"
     result["conclusions"] = conclusions(result)
     return result
+
+
+POSITION = [
+    ("no_price", "нет цены конкурента"), ("d20", "дороже цели >20%"), ("d10", "дороже 10–20%"), ("d", "дороже до 10%"),
+    ("band", "в коридоре"), ("c", "дешевле до 10%"), ("c10", "дешевле 10–20%"), ("c20", "дешевле цели >20%"),
+]
+
+
+def _pos_key(gap: float | None, tol: float) -> str:
+    if gap is None:
+        return "no_price"
+    if abs(gap) <= tol + 1e-12:
+        return "band"
+    if gap < 0:
+        return "d20" if gap < -0.2 else "d10" if gap < -0.1 else "d"
+    return "c20" if gap > 0.2 else "c10" if gap > 0.1 else "c"
+
+
+def _position(rows: list[Row], tol: float, rec: bool, basis: str) -> dict:
+    """Где наша цена относительно цели — доля выручки и товаров, сейчас и после рекомендаций."""
+    def mix(attr: str, price_of) -> list[dict]:
+        acc = {k: [0, 0.0] for k, _ in POSITION}
+        for r in rows:
+            key = _pos_key(getattr(r, attr), tol)
+            sale, _ = money(r, price_of(r), basis)
+            acc[key][0] += 1
+            acc[key][1] += sale or 0
+        return [{"key": k, "label": t, "items": acc[k][0], "sale": acc[k][1]} for k, t in POSITION]
+
+    out = {"now": mix("gap", lambda r: r.cat_a)}
+    if rec:
+        out["after"] = mix("rec_gap", lambda r: r.rec.price if r.rec and r.rec.price else r.cat_a)
+    return out
+
+
+def _bridge(rows: list[Row], basis: str) -> dict:
+    """Откуда меняется прибыль при тех же продажах и сколько продаж нужно, чтобы шаг окупился.
+
+    Снижение окупается, если продажи этих товаров вырастут на (прибыль до / прибыль после − 1).
+    Повышение безопасно, пока продажи упадут не больше чем на (1 − прибыль до / прибыль после).
+    """
+    parts = {"up": [0, 0.0, 0.0, 0.0, []], "down": [0, 0.0, 0.0, 0.0, []]}
+    profit_now = 0.0
+    for r in rows:
+        _, p0 = money(r, r.cat_a, basis)
+        profit_now += p0 or 0
+        if not (r.rec and r.rec.price and r.cat_a) or abs(r.rec.price - r.cat_a) < 0.005:
+            continue
+        _, p1 = money(r, r.rec.price, basis)
+        sale0, _ = money(r, r.cat_a, basis)
+        side = "up" if r.rec.price > r.cat_a else "down"
+        x = parts[side]
+        x[0] += 1
+        x[1] += p0 or 0
+        x[2] += p1 or 0
+        x[3] += sale0 or 0
+        x[4].append(r.rec.change)
+    out = {"profit": profit_now}
+    for side, (n, p0, p1, sale0, changes) in parts.items():
+        item = {"items": n, "profit_before": p0, "profit_after": p1, "delta": p1 - p0, "sale": sale0,
+                "median_change": statistics.median(changes) if changes else None}
+        if side == "down":
+            item["need_lift"] = (p0 / p1 - 1) if p1 > 0 else None
+        else:
+            item["may_lose"] = (1 - p0 / p1) if p1 > 0 else None
+        out[side] = item
+    out["after"] = profit_now + out["up"]["delta"] + out["down"]["delta"]
+    return out
 
 
 CHANGE_BUCKETS = [
@@ -251,7 +327,7 @@ def _change_hist(rows: list[Row]) -> dict:
 
 def _limits(rows: list[Row]) -> list[dict]:
     """Почему рекомендация такая: по тексту причины у каждого товара."""
-    found = {"band": 0, "free": 0, "capped": 0, "vr": 0, "top": 0, "no_price": 0}
+    found = {"band": 0, "free": 0, "capped": 0, "payback": 0, "vr": 0, "top": 0, "no_price": 0}
     for r in rows:
         if not r.rec:
             continue
@@ -264,12 +340,15 @@ def _limits(rows: list[Row]) -> list[dict]:
             found["top"] += 1
         elif r.rec.kind == "vr" or "не ниже ВР" in reason:
             found["vr"] += 1
+        elif "окупаемостью" in reason:
+            found["payback"] += 1
         elif "ограничено" in reason:
             found["capped"] += 1
         else:
             found["free"] += 1
     titles = {
         "free": "дошли до цели", "capped": "упёрлись в лимит шага", "band": "уже в коридоре — не трогаем",
+        "payback": "снижение не окупится — режем меньше",
         "vr": "подняли до минимальной ВР", "top": "топ продаж категории A — не снижаем", "no_price": "нет цены конкурента",
     }
     return [{"key": k, "title": titles[k], "items": v} for k, v in found.items() if v]

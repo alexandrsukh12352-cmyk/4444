@@ -735,3 +735,38 @@ details.card.flat > summary { cursor: pointer; }
 .rec-live .ellip { max-width: 260px; }
 .live-grid > .wide { grid-column: 1 / -1; }
 .ch-small { font-size: 10px; }
+
+/* ---------- аналитика отчёта: позиция, прибыль, конкуренты */
+.mix-row { display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: 10px; align-items: center; margin: 6px 0; }
+.mix-t { font-size: 12.5px; color: var(--ink-2); font-weight: 600; }
+.mix-bar { display: flex; gap: 2px; height: 30px; border-radius: 6px; overflow: hidden; }
+.mix-bar i { display: flex; align-items: center; justify-content: center; font-style: normal; font-size: 12px; font-weight: 650; color: var(--ink); min-width: 2px; font-variant-numeric: tabular-nums; }
+.mix-legend { display: flex; flex-wrap: wrap; gap: 6px 14px; margin: 8px 0 6px; font-size: 12px; color: var(--ink-2); }
+.mix-legend i { display: inline-block; width: 12px; height: 12px; border-radius: 3px; margin-right: 5px; vertical-align: -2px; }
+.mix-legend i.goal-i { width: 3px; background: #17212b; border-radius: 1px; }
+.br-row { display: grid; grid-template-columns: 120px minmax(0, 1fr) 120px; gap: 10px; align-items: center; margin: 8px 0; }
+.br-t { font-size: 13px; font-weight: 600; display: grid; }
+.br-t small { font-weight: 400; color: var(--muted); font-size: 11.5px; }
+.br-track { position: relative; height: 18px; background: #f4f6f8; border-radius: 4px; }
+.br-track i { position: absolute; top: 2px; bottom: 2px; border-radius: 3px; }
+.br-track em { position: absolute; left: 50%; top: -3px; bottom: -3px; width: 1px; background: #98a2b3; }
+.br-v { text-align: right; font-variant-numeric: tabular-nums; }
+.br-v.pos { color: #1f5f99; } .br-v.neg { color: #b3541e; }
+.pb-list { display: grid; gap: 6px; margin-top: 10px; }
+.pb { font-size: 13px; padding: 6px 10px; border-radius: 8px; background: #f7fafb; border-left: 4px solid var(--line-2); }
+.pb.up { border-left-color: #1f5f99; } .pb.down { border-left-color: #b3541e; }
+.cp-axis { display: grid; grid-template-columns: 140px minmax(0, 1fr) 150px; font-size: 11.5px; color: var(--muted); margin-bottom: 4px; }
+.cp-axis span:nth-child(1) { grid-column: 2; justify-self: start; grid-row: 1; }
+.cp-axis span:nth-child(2) { grid-column: 2; justify-self: center; grid-row: 1; }
+.cp-axis span:nth-child(3) { grid-column: 2; justify-self: end; grid-row: 1; }
+.cp-row { display: grid; grid-template-columns: 140px minmax(0, 1fr) 150px; gap: 10px; align-items: center; padding: 5px 0; }
+.cp-name { font-weight: 600; display: grid; }
+.cp-name small { font-weight: 400; color: var(--muted); font-size: 11.5px; }
+.cp-track { position: relative; height: 22px; background: #f4f6f8; border-radius: 4px; }
+.cp-track em { position: absolute; left: 50%; top: -3px; bottom: -3px; width: 1px; background: #98a2b3; }
+.cp-track i { position: absolute; border-radius: 3px; }
+.cp-track i.now { top: 3px; height: 7px; background: #9fb3c8; }
+.cp-track i.after { top: 12px; height: 7px; background: #0f4c5c; }
+.cp-track .goal { position: absolute; top: -4px; bottom: -4px; width: 3px; margin-left: -1px; background: #17212b; border-radius: 1px; }
+.cp-num { text-align: right; font-variant-numeric: tabular-nums; font-size: 13px; }
+.cp-num .to { color: #0f4c5c; font-weight: 650; }

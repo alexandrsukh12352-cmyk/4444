@@ -138,8 +138,21 @@ def test_car_parser_segments():
     assert p.parse("").segment == "Не определён"
 
 
+def test_price_cut_is_limited_by_payback():
+    opt = RecOptions(enabled=True, tolerance=3, down=10, min_vr=0, rounding=1, max_lift=20)
+    # ВР 50%: снижение окупается ростом продаж на 20%, если оно не глубже 20 × 0,5 / 1,2 ≈ 8,3%.
+    cut = recommend(100, 50, 50, "Средний", "tail", opt, "Brembo")
+    assert cut.price == 92 and cut.kind == "down" and "окупаемостью" in cut.reason
+    # ВР 10%: окупаемое снижение меньше коридора — цену не трогаем, объясняем почему.
+    thin = recommend(100, 90, 50, "Средний", "tail", opt, "Brembo")
+    assert thin.price == 100 and thin.kind == "keep" and "окупаемостью" in thin.reason
+    # Повышение правило не трогает.
+    assert recommend(100, 50, 200, "Средний", "tail", opt, "Brembo").price == 105
+
+
 def test_recommend_respects_limits_and_margin():
-    opt = RecOptions(enabled=True, tolerance=3, down=10, up={"Премиум": 10, "Бюджетный": 2, "Средний": 5}, min_vr=32, rounding=1)
+    opt = RecOptions(enabled=True, tolerance=3, down=10, up={"Премиум": 10, "Бюджетный": 2, "Средний": 5}, min_vr=32, rounding=1,
+                     max_lift=0)
     up = recommend(100, 50, 200, "Премиум", "tail", opt, "Brembo")
     assert up.price == 110 and up.kind == "up"
     assert recommend(100, 50, 200, "Бюджетный", "tail", opt, "Lada").price == 102

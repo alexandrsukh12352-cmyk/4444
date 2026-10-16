@@ -65,6 +65,7 @@ CROSS_SPLITS = {
     "subgroup_abc": "Подгруппы и ABC",
 }
 PRICE_SOURCES = {"acp": "АЦПКД", "prices": "Прайсы", "both": "АЦПКД и прайсы"}
+PRICE_PICKS = {"min": "Самая низкая", "second": "Вторая снизу", "median": "Медиана поставщиков"}
 REPORT_KINDS = {"full": "Полный"}  # быстрого отчёта больше нет
 SUBGROUP_MODES = {"sheets": "Лист на подгруппу", "single": "Все на одном листе"}
 
@@ -175,6 +176,7 @@ class Options:
     cross_split: str = "none"
     cross_modes: dict[str, str] = field(default_factory=dict)  # «КОНКУРЕНТ|сегмент» -> режим
     price_source: str = "both"
+    price_pick: str = "min"  # min — самая низкая; second — вторая снизу; median — медиана по поставщикам
     monitoring_only: bool = True
     in_stock_only: bool = False
     subgroup_mode: str = "sheets"
@@ -194,6 +196,8 @@ class Options:
             opt.cross_split = "none"
         if opt.price_source not in PRICE_SOURCES:
             opt.price_source = "both"
+        if opt.price_pick not in PRICE_PICKS:
+            opt.price_pick = "min"
         if opt.report_kind not in REPORT_KINDS:
             opt.report_kind = "full"
         # Отчёт строится только от ПСТ: вариант «АЦПКД + столбцы из ПСТ» убран.
@@ -1143,6 +1147,31 @@ def suggestions_map(analysis: list[dict]) -> dict[tuple[str, str], str]:
     return {(c["key"], s["seg"]): s["mode"] for c in analysis for s in c["segments"]}
 
 
+def pick_offer(offers: list, how: str = "min"):
+    """Цена конкурента из предложений поставщиков.
+
+    min — самая низкая (как раньше). У Brembo и MANN самая низкая обычно на 11–16% ниже рынка:
+    это один дешёвый склад, а не рыночная цена. second — вторая снизу, median — медиана; в обоих
+    сначала берётся минимум каждого поставщика по его городам, чтобы склады одного поставщика не
+    перевешивали остальных. Меньше двух поставщиков — самая низкая.
+    """
+    if not offers:
+        return None
+    if how not in ("second", "median"):
+        return min(offers, key=lambda o: o.price)
+    per: dict = {}
+    for o in offers:
+        key = supplier_key(str(getattr(o, "supplier", "") or "").split(" · ")[0]) or id(o)
+        if key not in per or o.price < per[key].price:
+            per[key] = o
+    ranked = sorted(per.values(), key=lambda o: o.price)
+    if len(ranked) < 2:
+        return ranked[0]
+    if how == "second":
+        return ranked[1]
+    return ranked[(len(ranked) - 1) // 2]
+
+
 def attach_crosses(src: Sources, rows: list[Row], opt: Options, index: PriceIndex, modes: dict[tuple[str, str], str]) -> None:
     has_svod = bool(src.crosses)
     for r in rows:
@@ -1156,7 +1185,7 @@ def attach_crosses(src: Sources, rows: list[Row], opt: Options, index: PriceInde
             picks = select(mode, svod_comp(svod, comp.key), acp_crosses(r.acp, comp.key), index, comp.key, has_svod)
             r.picks[comp.key] = picks
             offers = [o for p in picks for o in p.offers]
-            best = min(offers, key=lambda o: o.price) if offers else None
+            best = pick_offer(offers, opt.price_pick)
             r.prices[comp.key] = best.price if best else None
             if best:
                 r.best[comp.key] = best

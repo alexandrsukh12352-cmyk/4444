@@ -26,7 +26,7 @@ const S = {
   folder: "",
   opts: {
     brand: "", group: "", base: "pst", sources: {}, filters: {}, abc: [], cross_modes: {}, cross_split: "none",
-    price_source: "both", monitoring_only: true, in_stock_only: false, subgroup_mode: "sheets", suggest_threshold: 0.3,
+    price_source: "both", price_pick: "min", monitoring_only: true, in_stock_only: false, subgroup_mode: "sheets", suggest_threshold: 0.3,
     report_kind: "full", green_when: "above", rec: {}, ui: "template",
   },
   priceFiles: [],
@@ -208,9 +208,9 @@ async function start() {
   if (opened) hideBoot();
 }
 
-const CUSTOM_KEYS = ["base", "sources", "filters", "abc", "cross_modes", "cross_split", "price_source",
+const CUSTOM_KEYS = ["base", "sources", "filters", "abc", "cross_modes", "cross_split", "price_source", "price_pick",
   "monitoring_only", "in_stock_only", "subgroup_mode", "suggest_threshold", "green_when"];
-const REC_NUMS = ["tolerance", "down", "min_vr", "top_share", "mid_share", "top_factor", "mid_factor", "rounding"];
+const REC_NUMS = ["tolerance", "down", "min_vr", "top_share", "mid_share", "top_factor", "mid_factor", "rounding", "max_lift"];
 
 function clone(value) {
   return value == null ? value : JSON.parse(JSON.stringify(value));
@@ -373,6 +373,7 @@ function applyTemplate() {
   S.opts.filters = {};
   S.opts.abc = [];
   S.opts.price_source = "both";
+  S.opts.price_pick = "min";
   S.opts.monitoring_only = true;
   S.opts.in_stock_only = false;
   S.opts.cross_split = "none";
@@ -1046,6 +1047,11 @@ function renderPriceControls() {
   const el = $("#price-source");
   el.innerHTML = Object.entries(S.init.price_sources).map(([k, t]) => `<button data-v="${k}">${esc(t)}</button>`).join("");
   seg(el, S.opts.price_source, (v) => { S.opts.price_source = v; renderPriceControls(); renderPriceFiles(); analyze(); });
+  const pick = $("#price-pick");
+  if (pick) {
+    pick.innerHTML = Object.entries(S.init.price_picks || { min: "Самая низкая" }).map(([k, t]) => `<button type="button" data-v="${k}">${esc(t)}</button>`).join("");
+    seg(pick, S.opts.price_pick || "min", (v) => { S.opts.price_pick = v; analyze(); });
+  }
   $("#monitoring-only").checked = S.opts.monitoring_only;
   $("#in-stock-only").checked = S.opts.in_stock_only;
   const a = S.analysis;
@@ -2014,6 +2020,8 @@ const KNOBS = [
     hint: "По ценовому сегменту автопарка: премиум терпит рост лучше" },
   { key: "min_vr", title: "Не опускать ВР ниже", unit: "%", min: 0, max: 60, step: 1,
     hint: "Защита маржи: ниже — цену поднимаем, даже если рынок дешевле" },
+  { key: "max_lift", title: "Снижать, только если окупится ростом продаж до", unit: "%", min: 0, max: 60, step: 1,
+    hint: "Снижение на 8% при ВР 39% окупается, только если продажи вырастут на 26%. Глубже этого порога цену не режем. 0 — не проверять" },
   { key: "top_share", title: "Топ продаж — первые", unit: "% штук", min: 10, max: 90, step: 5, pair: "top_factor",
     hint: "У топа шаги меньше: множитель лимитов" },
   { key: "mid_share", title: "Середина — до", unit: "% штук", min: 20, max: 100, step: 5, pair: "mid_factor",
@@ -2164,6 +2172,88 @@ function hbars(rows, total) {
   </div>`).join("")}</div>`;
 }
 
+// Где наша цена относительно цели: расходящаяся шкала, «нет цены» — отдельно, серым со штриховкой.
+const POS_COLORS = { no_price: "url(#hatch)", d20: "#b3541e", d10: "#e08a4a", d: "#f2c49b", band: "#c9d1d9", c: "#a9cbe8", c10: "#5b9bd5", c20: "#1f5f99" };
+const POS_CSS = { no_price: "repeating-linear-gradient(135deg,#e5e9ee 0 4px,#f5f7f9 4px 8px)", d20: "#b3541e", d10: "#e08a4a", d: "#f2c49b", band: "#c9d1d9", c: "#a9cbe8", c10: "#5b9bd5", c20: "#1f5f99" };
+
+function positionMix(d) {
+  const pos = d.position;
+  if (!pos || !pos.now) return "";
+  const byRub = d.weight_by !== "items";
+  const line = (title, parts) => {
+    const total = parts.reduce((s, p) => s + (byRub ? p.sale : p.items), 0) || 1;
+    const segs = parts.filter((p) => (byRub ? p.sale : p.items) > 0).map((p) => {
+      const share = (byRub ? p.sale : p.items) / total;
+      const dark = ["d20", "c20", "c10"].includes(p.key);
+      return `<i style="flex:${share};background:${POS_CSS[p.key]};${dark ? "color:#fff" : ""}" title="${esc(`${p.label}: ${Math.round(share * 100)}% выручки · ${fmtInt(p.items)} тов. · ${fmtRub(p.sale)}`)}">${share >= 0.06 ? `${Math.round(share * 100)}%` : ""}</i>`;
+    }).join("");
+    return `<div class="mix-row"><span class="mix-t">${esc(title)}</span><div class="mix-bar">${segs}</div></div>`;
+  };
+  const legend = pos.now.map((p) => `<span><i style="background:${POS_CSS[p.key]}"></i>${esc(p.label)}</span>`).join("");
+  const total = pos.now.reduce((s, p) => s + p.sale, 0) || 1;
+  const none = pos.now.find((p) => p.key === "no_price");
+  const dear = pos.now.filter((p) => p.key.startsWith("d")).reduce((s, p) => s + p.sale, 0);
+  const cheap = pos.now.filter((p) => p.key.startsWith("c")).reduce((s, p) => s + p.sale, 0);
+  const band = (pos.now.find((p) => p.key === "band") || {}).sale || 0;
+  const priced = total - (none ? none.sale : 0);
+  const say = priced
+    ? `Из выручки с ценой конкурента: дороже цели — ${Math.round(dear / priced * 100)}%, в коридоре — ${Math.round(band / priced * 100)}%, дешевле — ${Math.round(cheap / priced * 100)}%. Без цены конкурента — ${Math.round((none ? none.sale : 0) / total * 100)}% выручки: по ним рекомендация видит только ВР.`
+    : "Цены конкурента нет ни у одного товара — рекомендация видит только ВР.";
+  return `<div class="card flat wide"><div class="dash-title">Где наша цена относительно цели <span class="muted">· доля выручки группы</span></div>
+    ${line("Сейчас", pos.now)}${pos.after ? line("После", pos.after) : ""}
+    <div class="mix-legend">${legend}</div><div class="muted small-text">${esc(say)}</div></div>`;
+}
+
+function bridgeBlock(d) {
+  const b = d.bridge;
+  if (!b) return "";
+  const up = b.up || {};
+  const dn = b.down || {};
+  const net = (up.delta || 0) + (dn.delta || 0);
+  const max = Math.max(1, Math.abs(up.delta || 0), Math.abs(dn.delta || 0), Math.abs(net));
+  const bar = (label, v, color, sub) => `<div class="br-row"><span class="br-t">${esc(label)}<small>${esc(sub || "")}</small></span>
+      <span class="br-track"><em></em><i style="${v >= 0 ? `left:50%` : `right:50%`};width:${Math.abs(v) / max * 50}%;background:${color}"></i></span>
+      <b class="br-v ${v > 0 ? "pos" : v < 0 ? "neg" : ""}">${fmtSignedRub(v)}</b></div>`;
+  const pct = b.profit ? ` (${fmtPct(net / b.profit, true)} прибыли)` : "";
+  const lines = [];
+  if (up.items) {
+    lines.push(`<div class="pb up"><b>↑ ${fmtInt(up.items)} ${plural(up.items, "товар", "товара", "товаров")}</b>, медиана ${fmtPct(up.median_change, true)}.
+      ${up.may_lose != null ? `Прибыль не упадёт, даже если их продажи снизятся на <b>${fmtPct(up.may_lose)}</b>.` : ""}</div>`);
+  }
+  if (dn.items) {
+    lines.push(`<div class="pb down"><b>↓ ${fmtInt(dn.items)} ${plural(dn.items, "товар", "товара", "товаров")}</b>, медиана ${fmtPct(dn.median_change, true)}.
+      ${dn.need_lift != null ? `Окупится, только если их продажи вырастут на <b>${fmtPct(dn.need_lift)}</b> — иначе это минус прибыли.` : ""}</div>`);
+  }
+  return `<div class="card flat"><div class="dash-title">Откуда меняется прибыль <span class="muted">· при тех же продажах</span></div>
+    ${bar("Повышения", up.delta || 0, "#1f5f99", up.items ? `${fmtInt(up.items)} тов.` : "")}
+    ${bar("Снижения", dn.delta || 0, "#b3541e", dn.items ? `${fmtInt(dn.items)} тов.` : "")}
+    ${bar("Итого", net, "#17212b", pct)}
+    <div class="pb-list">${lines.join("") || `<div class="muted">Рекомендация ничего не меняет.</div>`}</div></div>`;
+}
+
+function compBars(d, recOn) {
+  const comps = (d.slices || []).filter((s) => s.kind === "comp" && s.n);
+  if (!comps.length) return "";
+  const val = (s, key) => (s[key] != null ? s[key] : s.median);
+  const vals = comps.flatMap((s) => [val(s, "weighted"), s.weighted_rec, s.target_dev]).filter((v) => v != null);
+  const span = Math.min(0.6, Math.max(0.1, ...vals.map((v) => Math.abs(v)))) * 1.1;
+  const x = (v) => 50 + Math.max(-50, Math.min(50, (v / span) * 50));
+  const rows = comps.map((s) => {
+    const now = val(s, "weighted");
+    const after = s.weighted_rec;
+    const name = String(s.title).replace(" (без учёта % позиц.)", "").replace("Против ", "");
+    const seg = (v, cls) => v == null ? "" : `<i class="${cls}" style="${v >= 0 ? `left:50%;width:${x(v) - 50}%` : `left:${x(v)}%;width:${50 - x(v)}%`}"></i>`;
+    const goal = s.target_dev != null ? `<b class="goal" style="left:${x(s.target_dev)}%" title="Цель по позиционированию: ${esc(fmtPct(s.target_dev, true))}"></b>` : "";
+    return `<div class="cp-row" title="${esc(`${name}: ${fmtInt(s.n)} тов. с ценой. Сейчас ${fmtPct(now, true)}${after != null ? `, после ${fmtPct(after, true)}` : ""}${s.target_dev != null ? `, цель ${fmtPct(s.target_dev, true)}` : ""}. Плюс — мы дешевле`)}">
+      <span class="cp-name">${esc(name)}<small>${fmtInt(s.n)} тов.</small></span>
+      <span class="cp-track"><em></em>${seg(now, "now")}${recOn ? seg(after, "after") : ""}${goal}</span>
+      <span class="cp-num">${fmtPct(now, true)}${recOn && after != null ? ` <span class="to">→ ${fmtPct(after, true)}</span>` : ""}</span></div>`;
+  }).join("");
+  return `<div class="card flat wide"><div class="dash-title">Мы против каждого конкурента <span class="muted">· средняя по выручке разница в цене</span></div>
+    <div class="cp-axis"><span>← мы дороже</span><span>вровень</span><span>мы дешевле →</span></div>${rows}
+    <div class="mix-legend"><span><i style="background:#9fb3c8"></i>сейчас</span>${recOn ? `<span><i style="background:#0f4c5c"></i>после рекомендаций</span>` : ""}<span><i class="goal-i"></i>цель по позиционированию</span></div></div>`;
+}
+
 function tile(label, value, sub, kind = "") {
   return `<div class="kpi ${kind}"><div class="l">${label}</div><div class="v">${value}</div><div class="s">${sub || ""}</div></div>`;
 }
@@ -2202,8 +2292,9 @@ function renderDash() {
   const changeChart = recOn && ch ? groupedBars(ch.labels, ch.items, null, {
     colorA: (i) => (i < 4 ? "#1d4ed8" : i === 4 ? "#98a2b3" : "#b42318"),
   }) : "";
-  const limitColors = { free: "#0f4c5c", capped: "#d97706", band: "#98a2b3", vr: "#7c3aed", top: "#0891b2", no_price: "#cbd5e1" };
-  const limits = recOn && (d.limits || []).length ? hbars(d.limits.map((x) => ({ label: x.title, value: x.items, color: limitColors[x.key] })), d.items) : "";
+  const limitColors = { free: "#0f4c5c", capped: "#d97706", band: "#98a2b3", vr: "#7c3aed", top: "#0891b2", payback: "#b3541e", no_price: "#cbd5e1" };
+  const limitRows = (d.limits || []).filter((x) => x.key !== "no_price");
+  const limits = recOn && limitRows.length ? hbars(limitRows.map((x) => ({ label: x.title, value: x.items, color: limitColors[x.key] })), limitRows.reduce((n, x) => n + x.items, 0)) : "";
   const groupHead = (first) => (recOn
     ? `<th>${esc(first)}</th><th class="num">Шт.</th><th class="num">ВР</th><th class="num">После</th><th class="num">Δ ВР</th><th class="num">Ср. откл.</th><th class="num">После</th>`
     : `<th>${esc(first)}</th><th class="num">Шт.</th><th class="num">ВР</th><th class="num">Ср. откл.</th>`);
@@ -2237,13 +2328,11 @@ function renderDash() {
     ${(d.conclusions || []).length ? `<div class="card flat"><div class="dash-title">Выводы</div><ul class="conclusions">${d.conclusions.map((t) => `<li>${esc(t)}</li>`).join("")}</ul></div>` : ""}
     ${recOn ? "" : `<div class="note info">Включите переключатель «Рекомендованные цены» слева — справа появится «сейчас → после», и каждый ползунок будет пересчитывать цифры сразу.</div>`}
     <div class="live-grid">
-      <div class="card flat"><div class="dash-title">Отклонение от цели${recOn ? ` <span class="muted">· серое/цветное — сейчас, тёмное — после</span>` : ""}</div>${devChart}
-        <div class="muted small-text">Плюс — мы дешевле цели, минус — дороже. Цель — цена конкурента с процентом позиционирования.</div></div>
-      ${recOn ? `<div class="card flat"><div class="dash-title">Насколько меняем цены <span class="muted">· товаров</span></div>${changeChart}</div>` : ""}
-      ${limits ? `<div class="card flat"><div class="dash-title">Что решило рекомендацию</div>${limits}
-        <div class="muted small-text">«Упёрлись в лимит» — до цели не дошли из-за шага; ослабьте «не понижать / не повышать», если хотите ближе к цели.</div></div>` : ""}
-      ${comps.length ? `<div class="card flat wide"><div class="dash-title">Отклонение от каждого конкурента <span class="muted">· плюс — мы дешевле его цены, минус — дороже</span></div>
-        <div class="table-wrap"><table class="mini"><thead><tr><th>Конкурент</th><th class="num">Товаров</th><th class="num">Сейчас</th>${recOn ? `<th class="num">После</th>` : ""}<th class="num">Медиана</th></tr></thead><tbody>${compRows}</tbody></table></div></div>` : ""}
+      ${positionMix(d)}
+      ${recOn ? bridgeBlock(d) : ""}
+      ${limits ? `<div class="card flat"><div class="dash-title">Что решило рекомендацию <span class="muted">· товары с ценой конкурента</span></div>${limits}
+        <div class="muted small-text">«Упёрлись в лимит» — до цели не дошли из-за шага. «Окупаемость» — снижение глубже не окупится ростом продаж.</div></div>` : ""}
+      ${compBars(d, recOn)}
     </div>
     ${recOn && movers.length ? `<div class="card flat"><div class="dash-title">Что сильнее меняет прибыль</div>
       <div class="table-wrap scroll"><table class="mini"><thead><tr><th>Артикул</th><th>Наименование</th><th class="num">Кат. А</th><th class="num">Рек.</th><th class="num">Изм.</th><th class="num">Δ прибыли</th><th>Почему</th></tr></thead><tbody>${moverRows}</tbody></table></div></div>` : ""}

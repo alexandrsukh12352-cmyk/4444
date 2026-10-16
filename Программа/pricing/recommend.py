@@ -39,13 +39,14 @@ class RecOptions:
     top_factor: float = 0.5  # во сколько раз ужимаются лимиты для топа
     mid_factor: float = 0.75
     rounding: float = 1.0  # шаг округления Кат. А, руб.
+    max_lift: float = 20.0  # снижение окупается, только если продажи вырастут не больше чем на N %; 0 — не проверять
     priced_first: bool = True
 
     @classmethod
     def from_dict(cls, data: dict | None) -> "RecOptions":
         data = dict(data or {})
         known = {k: v for k, v in data.items() if k in cls.__dataclass_fields__}
-        for key in ("tolerance", "down", "min_vr", "top_share", "mid_share", "top_factor", "mid_factor", "rounding"):
+        for key in ("tolerance", "down", "min_vr", "top_share", "mid_share", "top_factor", "mid_factor", "rounding", "max_lift"):
             if known.get(key) not in (None, ""):
                 known[key] = float(known[key])
         if "enabled" in known:
@@ -69,7 +70,7 @@ def bundled_rec() -> dict:
         "tolerance": base.tolerance, "down": base.down, "min_vr": base.min_vr,
         "top_share": base.top_share, "mid_share": base.mid_share,
         "top_factor": base.top_factor, "mid_factor": base.mid_factor,
-        "rounding": base.rounding, "up": dict(base.up),
+        "rounding": base.rounding, "max_lift": base.max_lift, "up": dict(base.up),
     }
 
 
@@ -149,9 +150,21 @@ class Rec:
     kind: str  # keep | up | down | vr | none
 
 
+def sales_weight(rows) -> "callable":
+    """Вес товара: продажи в штуках, а если штук в выгрузке нет ни у кого — продажи в рублях.
+
+    В «Продажах» бывает только «Сумма продажи, руб» — тогда топ и середина считаются по рублям,
+    иначе защита топа от снижения не срабатывает ни у одного товара.
+    """
+    if any((r.sales_qty or 0) > 0 for r in rows):
+        return lambda r: r.sales_qty or 0
+    return lambda r: r.sales or 0
+
+
 def weight_classes(rows, opt: RecOptions) -> dict[str, str]:
-    """Код -> top / mid / tail по накопленной доле продаж в шт."""
-    sold = sorted(((r.sales_qty or 0, r.code) for r in rows if (r.sales_qty or 0) > 0), reverse=True)
+    """Код -> top / mid / tail по накопленной доле продаж в шт (или в рублях, если штук нет)."""
+    w = sales_weight(rows)
+    sold = sorted(((w(r), r.code) for r in rows if w(r) > 0), reverse=True)
     total = sum(q for q, _ in sold)
     result = {r.code: "tail" for r in rows}
     acc = 0.0
@@ -249,13 +262,29 @@ def recommend(cur: float | None, sbs: float | None, target: float | None, segmen
                     reason += f" ({who})"
             else:
                 limited = max(-down, min(up, change))
-                price = cur * (1 + limited)
-                kind = "up" if limited > 0 else "down"
-                reason = f"к цели {who}".strip()
-                if limited != change:
-                    reason += f", ограничено {'+' if limited > 0 else '−'}{abs(limited) * 100:.1f}%"
-                    if limited > 0:
-                        reason += f" ({segment.lower()} сегмент)"
+                payback = ""
+                if limited < 0 and opt.max_lift > 0 and sbs and cur:
+                    # Снижение на p при марже m окупается, если продажи вырастут на p / (m − p).
+                    m = 1 - sbs / cur
+                    lift = opt.max_lift / 100
+                    cap = lift * m / (1 + lift) if m > 0 else 0.0
+                    if -limited > cap:
+                        need = -limited / (m + limited) if m + limited > 0 else None
+                        limited = -cap
+                        payback = (f"снижение ограничено окупаемостью: для −{abs(change) * 100:.0f}% "
+                                   f"нужно {'+' + format(need * 100, '.0f') + '% продаж' if need else 'продавать в разы больше'}")
+                if abs(limited) * 100 < max(opt.tolerance, 0.5) and payback:
+                    price, kind, reason = cur, "keep", payback
+                else:
+                    price = cur * (1 + limited)
+                    kind = "up" if limited > 0 else "down"
+                    reason = f"к цели {who}".strip()
+                    if payback:
+                        reason += f"; {payback}"
+                    elif limited != change:
+                        reason += f", ограничено {'+' if limited > 0 else '−'}{abs(limited) * 100:.1f}%"
+                        if limited > 0:
+                            reason += f" ({segment.lower()} сегмент)"
     else:
         price, kind, reason = cur, "keep", "нет цены конкурента"
 
