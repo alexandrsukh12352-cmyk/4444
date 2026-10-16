@@ -258,7 +258,7 @@ def test_full_report_formulas_match_python(tmp_path, src, settings):
     assert "Основание" not in head and "Brembo" not in head
     assert wb["Отчет"].cell(3, 1).fill.fill_type == "solid"
     for other in wb.worksheets:
-        if other.title in ("Отчет", "Списки", "Итоги", "Цены"):
+        if other.title in ("Отчет", "Списки", "Итоги", "Цены", "Графики"):
             continue
         assert other.tables == {}
         assert list(other.conditional_formatting) == []
@@ -329,8 +329,8 @@ def test_summary_and_prices_sheets_link_to_the_report(tmp_path, src, settings):
 
 
 def test_cross_sheet_lists_selected_articles_and_supplier_prices(tmp_path, src, settings):
-    _, prep, _, wb = _build(tmp_path, src, settings)
-    assert wb.sheetnames[3] == "Кроссы"
+    _, prep, _, wb = _build(tmp_path, src, settings, price_pick="min")
+    assert wb.sheetnames[3] == "Кроссы" and wb["Графики"].sheet_state == "hidden"
     cross = wb["Кроссы"]
     assert cross.sheet_state == "hidden"
     assert list(cross.merged_cells.ranges) == []
@@ -390,3 +390,74 @@ def test_sheet_filters_do_not_write_the_excel_row(tmp_path, src, settings):
     for col in re.findall(r'<col\b[^>]*outlineLevel="1"[^>]*/>', report_xml):
         assert col.index("min=") < col.index("outlineLevel=")
         assert col.index("max=") < col.index("outlineLevel=")
+
+
+def test_no_sales_never_raises_price():
+    opt = RecOptions(enabled=True, tolerance=3, down=10, min_vr=30, max_lift=20)
+    # мы дешевле цели, продаж нет — дело не в цене
+    cheap = recommend(100, 40, 120, "Средний", "tail", opt, "Brembo", sold=False, stock=True)
+    assert cheap.price == 100 and cheap.kind == "keep" and "нет спроса" in cheap.reason
+    # продаж нет, остатка нет — не трогаем
+    gone = recommend(100, 40, 80, "Средний", "tail", opt, "Brembo", sold=False, stock=False)
+    assert gone.price == 100 and gone.kind == "keep"
+    # продаж нет, есть остаток, мы дороже цели — снижаем к цели, окупаемость не мешает
+    dear = recommend(100, 40, 90, "Средний", "tail", opt, "Brembo", sold=False, stock=True)
+    assert dear.price == 90 and dear.kind == "down" and "нет продаж" in dear.reason
+    # нет цены конкурента и ВР ниже порога — без продаж не поднимаем
+    blind = recommend(100, 80, None, "Средний", "tail", opt, sold=False, stock=True)
+    assert blind.price == 100 and blind.kind == "keep"
+    # новинка без продаж — как обычно: к цели вверх
+    new = recommend(100, 40, 120, "Средний", "tail", opt, "Brembo", sold=False, stock=True, new=True)
+    assert new.price > 100
+
+
+def test_min_margin_does_not_lift_price_above_the_market():
+    opt = RecOptions(enabled=True, tolerance=3, down=0, min_vr=40, max_lift=0)
+    # ВР 20%, мы дороже цели: поднимать к мин. ВР — уходить от рынка дальше
+    dear = recommend(100, 80, 95, "Средний", "top", opt, "Brembo", abc="AA")
+    assert dear.price == 100 and "рынок ниже" in dear.reason
+    # ВР 20%, цель выше нас на 3%: поднимаем, но не выше цели
+    near = recommend(100, 80, 103, "Средний", "tail", RecOptions(enabled=True, tolerance=5, min_vr=40), "Brembo")
+    assert near.price == 103 and near.kind == "vr"
+    # цену недавно меняли — не трогаем
+    frozen = recommend(100, 40, 130, "Средний", "tail", opt, "Brembo", frozen="цену меняли 01.10 — ждём до 30.12")
+    assert frozen.price == 100 and frozen.kind == "keep" and "ждём" in frozen.reason
+
+
+def test_recent_sales_file_is_told_apart_from_the_year():
+    from pricing.excel import Sheet
+    from pricing.sources import classify, is_recent_sales
+
+    grid = [["Код", "Артикул", "Сумма продажи", "Количество"], ["1", "A1", 100, 2]]
+    year = classify(Sheet(Path("Продажи 2025.xlsx"), "Лист1", grid))
+    recent = classify(Sheet(Path("Продажи за 3 месяца.xlsx"), "Лист1", grid))
+    assert year.kind == recent.kind == "sales"
+    assert not is_recent_sales(year) and is_recent_sales(recent)
+    head = [["Начало периода: 01.07.2026"], ["Конец периода: 30.09.2026"], *grid]
+    assert is_recent_sales(classify(Sheet(Path("Продажи.xlsx"), "Лист1", head)))
+
+
+def test_recent_sales_drive_the_no_sales_rule(tmp_path, settings):
+    import shutil
+
+    folder = tmp_path / "in"
+    shutil.copytree(SAMPLES, folder)
+    # та же выгрузка «Продажи», отдельным файлом с «3 месяца» в имени
+    book = openpyxl.load_workbook(folder / "Advics диски.xlsx")
+    sheet = next(ws for ws in book.worksheets if any("Сумма продажи" in str(c.value or "") for row in ws.iter_rows(max_row=12) for c in row))
+    out = openpyxl.Workbook()
+    for row in sheet.iter_rows(values_only=True):
+        out.active.append(list(row))
+    out.save(folder / "Продажи за 3 месяца.xlsx")
+    src3 = scan([folder, CROSSES])
+    assert src3.located("sales3") and src3.located("sales")
+    assert src3.sales3 == src3.sales
+    opt = R.Options(**GROUP, rec={"enabled": True})
+    prep = R.prepare(src3, settings, opt)
+    sold = [r for r in prep.kept if (r.sales or 0) > 0]
+    assert sold and all(r.sales3 == r.sales for r in sold)
+    quiet = [r for r in prep.kept if r.sales3 == 0 and r.rec and r.rec.kind in ("up", "vr") and not R.is_new(r)]
+    assert quiet == []
+    result = R.build_report(src3, settings, opt, tmp_path / "out")
+    head = _header(openpyxl.load_workbook(result.path)["Отчет"])
+    assert "Продажи 3 мес, шт" in head or "Продажи 3 мес, руб." in head

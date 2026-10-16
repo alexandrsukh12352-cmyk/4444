@@ -244,6 +244,10 @@ class Sources:
     sales: dict[str, float] = field(default_factory=dict)  # код -> руб
     sales_qty: dict[str, float] = field(default_factory=dict)  # код -> шт
     sales_period: str = ""  # «2025» или «01.03.2025–31.08.2025»
+    # Продажи за последние месяцы — та же выгрузка 1С за короткий период. Нет файла — пусто.
+    sales3: dict[str, float] = field(default_factory=dict)
+    sales3_qty: dict[str, float] = field(default_factory=dict)
+    sales3_period: str = ""
     price_sheets: list[Sheet] = field(default_factory=list)  # прайсы и всё нераспознанное
     sbs: dict[str, tuple[float | None, float | None]] = field(default_factory=dict)  # код -> (остаток, СБС)
     transit: dict[str, float] = field(default_factory=dict)  # нормализованный артикул -> заказано, шт (итого)
@@ -274,6 +278,7 @@ KINDS = [
 ]
 KIND_TITLES = {k: t for k, t, _, _ in KINDS} | {
     "positioning": "Позиционирование", "gz": "ГЗ", "transit": "Товар в пути", "oem": "ОЕМ",
+    "sales3": "Продажи за 3 месяца",
 }
 RESULT_MARKERS = {"Сводка", "Для заноса", "По артикулам", "Отчет", "Расч"}
 DATA_DIRS = {"1c": "Выгрузки 1С", "crosses": "Кроссы", "prices": "Прайсы"}
@@ -427,7 +432,7 @@ class Pack:
     sources: Sources
 
 
-COMPANY_KINDS = ("pst", "sbs", "sales")
+COMPANY_KINDS = ("pst", "sbs", "sales", "sales3")
 
 
 @dataclass
@@ -558,6 +563,8 @@ def _company_base(folder: Path) -> Sources:
         out.sales = src.sales
         out.sales_qty = src.sales_qty
         out.sales_period = src.sales_period
+    if "sales3" in found:
+        out.sales3, out.sales3_qty, out.sales3_period = src.sales3, src.sales3_qty, src.sales3_period
     return out
 
 
@@ -582,6 +589,8 @@ def apply_company(src: Sources, company: Sources) -> Sources:
             out.pst = company.pst
         elif kind == "sbs":
             out.sbs = company.sbs
+        elif kind == "sales3":
+            out.sales3, out.sales3_qty, out.sales3_period = company.sales3, company.sales3_qty, company.sales3_period
         else:
             out.sales = company.sales
             out.sales_qty = company.sales_qty
@@ -732,6 +741,8 @@ def scan(paths: list[Path], price_dirs: list[Path] | None = None, all_dates: boo
         located = [(s, classify(s)) for s in sheets]
         is_positioning_book = any(loc and loc.kind == "positioning" for _, loc in located)
         for s, loc in located:
+            if loc and loc.kind == "sales" and is_recent_sales(loc):
+                loc.kind = "sales3"
             if loc:
                 found[loc.kind].append(loc)
             elif is_positioning_book:
@@ -860,6 +871,36 @@ def read_sales(loc: Located) -> tuple[dict[str, float], dict[str, float]]:
         if "qty" in loc.cols:
             qty[key] += num(loc.get(row, "qty")) or 0.0
     return dict(amount), dict(qty)
+
+
+RECENT_WORDS = ("3 мес", "3мес", "три мес", "3-х мес", "3х мес", "квартал", "90 дн")
+
+
+def _period_days(loc: Located) -> int | None:
+    # Строки над таблицей; шапка 1С бывает склеена с ними, поэтому смотрим первые 15 строк листа.
+    text = " ".join(clean(v) for row in loc.header.sheet.grid[: max(loc.header.row, 15)] for v in row if clean(v))
+    start = re.search(r"начало периода:\s*(\d{2})\.(\d{2})\.(\d{4})", text, re.IGNORECASE)
+    end = re.search(r"конец периода:\s*(\d{2})\.(\d{2})\.(\d{4})", text, re.IGNORECASE)
+    if not (start and end):
+        return None
+    import datetime as _dt
+
+    try:
+        a = _dt.date(int(start.group(3)), int(start.group(2)), int(start.group(1)))
+        b = _dt.date(int(end.group(3)), int(end.group(2)), int(end.group(1)))
+    except ValueError:
+        return None
+    return (b - a).days + 1
+
+
+def is_recent_sales(loc: Located) -> bool:
+    """«Продажи за 3 месяца»: по слову в имени файла или листа, либо период в шапке не длиннее 100 дней."""
+    sheet = loc.header.sheet
+    name = norm_key(f"{getattr(sheet.file, 'name', '')} {getattr(sheet, 'name', '')}")
+    if any(w in name for w in RECENT_WORDS):
+        return True
+    days = _period_days(loc)
+    return days is not None and days <= 100
 
 
 def sales_period(loc: Located) -> str:
@@ -1089,6 +1130,9 @@ def load_all(src: Sources) -> None:
     if loc := src.located("sales"):
         src.sales, src.sales_qty = read_sales(loc)
         src.sales_period = sales_period(loc)
+    if loc := src.located("sales3"):
+        src.sales3, src.sales3_qty = read_sales(loc)
+        src.sales3_period = sales_period(loc)
     if loc := src.located("sbs"):
         src.sbs = read_sbs(loc)
     if loc := src.located("transit"):

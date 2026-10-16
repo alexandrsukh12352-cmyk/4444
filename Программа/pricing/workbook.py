@@ -701,6 +701,13 @@ def report_columns(rows: list[Row], refs: Refs, opt: Options, period: str,
         Column("СБС", "calc", 12, sbs_value, MONEY, key="sbs", input=is_input),
     ]
     cols.append(Column("СБС план", "calc", 12, sbs_plan, MONEY, key="sbs_plan"))
+    if any(r.sales3 is not None for r in rows):
+        # Продажи за последние месяцы — по ним правило «нет продаж — не поднимаем».
+        qty3 = any(r.sales3_qty for r in rows)
+        at = next(i for i, c in enumerate(cols) if c.key == "sales_qty") + 1
+        cols.insert(at, Column("Продажи 3 мес, шт" if qty3 else "Продажи 3 мес, руб.", "calc", 11,
+                               (lambda r, *_: r.sales3_qty) if qty3 else (lambda r, *_: r.sales3),
+                               INT if qty3 else MONEY, key="sales3"))
 
     def cat_a(r, n, L):
         if r.cat_a_calc and r.discount is not None and r.mo is not None and "mo" in L:
@@ -766,6 +773,11 @@ def report_columns(rows: list[Row], refs: Refs, opt: Options, period: str,
             Column("Откл. от цели", "pos", 9, lambda r, n, L: f'=IF({both(L["target"] + str(n), L["cat_a"] + str(n))},'
                    f'1-{L["cat_a"]}{n}/{L["target"]}{n},"")', PCT, key="gap", rule="band"),
         ]
+
+    if any(getattr(r, "last_change", None) for r in rows):
+        from .pricehistory import change_text
+
+        cols.append(Column("Цену меняли", "info", 26, lambda r, *_: change_text(getattr(r, "last_change", None)), key="changed"))
 
     if ro.enabled:
         def rec_value(r, *_):
@@ -1322,17 +1334,18 @@ def build_report(src: Sources, settings: Settings, opt: Options, out_dir: Path,
         infos.append(write_report_sheet(ws, head, sheet_rows, refs, opt, src.sales_period, src, live, settings))
 
     crosses = wb.create_sheet(sheet_title("Кроссы", used))
-    write_cross_prices(crosses, sheet_rows)
+    write_cross_prices(crosses, sheet_rows, opt.price_pick)
 
     from .dashboard import summary as dash_summary
     from .itogi import write_prices_overview, write_summary_sheet
 
     itogi = wb.create_sheet(sheet_title("Итоги", used))
-    write_summary_sheet(itogi, kept, infos, opt, src, title, dash_summary(kept, opt))
+    chart_ws = wb.create_sheet(sheet_title("Графики", used))
+    write_summary_sheet(itogi, kept, infos, opt, src, title, dash_summary(kept, opt), chart_ws)
     prices_ws = wb.create_sheet(sheet_title("Цены", used))
     write_prices_overview(prices_ws, sheet_rows, infos, opt)
 
-    order = [itogi] + [wb[i.title] for i in infos] + [prices_ws, crosses] + export_sheets
+    order = [itogi] + [wb[i.title] for i in infos] + [prices_ws, crosses, chart_ws] + export_sheets
     wb._sheets = order  # noqa: SLF001
     report_titles = {i.title for i in infos} | {itogi.title, prices_ws.title}
     for ws in wb.worksheets:
@@ -1357,7 +1370,10 @@ def build_report(src: Sources, settings: Settings, opt: Options, out_dir: Path,
                        priced, opt.report_kind, brief, prep)
 
 
-def write_cross_prices(ws, rows: list[Row]) -> None:
+PICK_HEAD = {"min": "Мин", "median": "Медиана", "second": "2-я снизу"}
+
+
+def write_cross_prices(ws, rows: list[Row], how: str = "min") -> None:
     """Выбранные кросс-артикулы и цены поставщиков. Шапка в два этажа, без объединения ячеек.
 
     В отчёте цена конкурента остаётся числом и на этот лист не ссылается.
@@ -1398,7 +1414,7 @@ def write_cross_prices(ws, rows: list[Row]) -> None:
             dim.hidden = True
             price_cols.append(col)
             col += 1
-        ws.cell(2, col, "Мин")
+        ws.cell(2, col, PICK_HEAD.get(how, "Мин"))
         ws.column_dimensions[get_column_letter(col)].width = 12
         groups.append((comp.key, price_cols, col))
         col += 1
@@ -1422,7 +1438,10 @@ def write_cross_prices(ws, rows: list[Row]) -> None:
                 cell = ws.cell(n, price_cols[offset], price)
                 if price is not None:
                     cell.number_format = MONEY
-            if price_cols:
+            if price_cols and how != "min":
+                # Медиана и вторая снизу считаются по поставщику, а не по складу: число, как в отчёте.
+                min_cell = ws.cell(n, min_col, r.prices.get(key))
+            elif price_cols:
                 start, end = get_column_letter(price_cols[0]), get_column_letter(price_cols[-1])
                 min_cell = ws.cell(n, min_col, f'=IF(COUNT({start}{n}:{end}{n})=0,"",MIN({start}{n}:{end}{n}))')
             else:

@@ -31,10 +31,11 @@ from .sources import (
 )
 
 WEB = Path(__file__).with_name("web")
-EXPECTED = ["pst", "sales", "sbs", "transit", "acp", "crosses", "discounts", "gz", "positioning", "oem"]
+EXPECTED = ["pst", "sales", "sales3", "sbs", "transit", "acp", "crosses", "discounts", "gz", "positioning", "oem"]
 DOC_HINTS = {
     "pst": "основа отчёта: товары, цены МО, закупка, ABC",
     "sales": "количество и сумма продаж",
+    "sales3": "продажи за последние 3 месяца, та же выгрузка 1С; в имени файла «3 мес» или период в шапке. По ним видно, продаётся ли товар сейчас",
     "sbs": "остаток и себестоимость",
     "transit": "заказано, шт — колонка «В пути» рядом с остатком. Файл группы или один на всех",
     "acp": "цены конкурентов. Файл группы или несколько файлов по категориям во «Входящие»",
@@ -632,7 +633,7 @@ def _missing_phrase(parts: list[str]) -> str:
     return "нет " + ", ".join(parts[:-1]) + " и " + parts[-1]
 
 
-REC_FIELDS = ("tolerance", "down", "min_vr", "top_factor", "mid_factor", "rounding", "max_lift")
+REC_FIELDS = ("tolerance", "down", "min_vr", "top_factor", "mid_factor", "rounding", "max_lift", "cooldown")
 
 
 def rec_group_key(brand: str, group: str) -> str:
@@ -1035,7 +1036,7 @@ def api_init(_body: dict) -> dict:
 def dataclasses_rec(rec: RecOptions) -> dict:
     return {
         "enabled": rec.enabled, "target": rec.target, "tolerance": rec.tolerance, "down": rec.down,
-        "up": rec.up, "min_vr": rec.min_vr, "max_lift": rec.max_lift,
+        "up": rec.up, "min_vr": rec.min_vr, "max_lift": rec.max_lift, "cooldown": rec.cooldown,
         "top_factor": rec.top_factor, "mid_factor": rec.mid_factor, "rounding": rec.rounding,
         "priced_first": rec.priced_first,
     }
@@ -1137,7 +1138,9 @@ def _waiting_prices(src: Sources) -> list[dict]:
 
 
 def _options(body: dict) -> report.Options:
-    return report.Options.from_dict(body.get("options") or {})
+    opt = report.Options.from_dict(body.get("options") or {})
+    opt.history_write = True  # окно программы ведёт историю цен; тесты и разбор файлов — нет
+    return opt
 
 
 def _sister_status(src, rows) -> dict:
@@ -1252,6 +1255,13 @@ def _remember_history(opt: report.Options, result) -> None:
     prep = getattr(result, "prep", None)
     if prep is None:
         return
+    if opt.recs.enabled:
+        try:
+            from .pricehistory import remember_recs
+
+            remember_recs(prep.kept)
+        except Exception:  # noqa: BLE001 — история не должна мешать сборке отчёта
+            pass
     try:
         insight.record_history(opt.brand, opt.group, prep.kept, dashboard_summary(prep.kept, opt), opt.stock_slice or "")
     except Exception:  # noqa: BLE001 — история не должна мешать сборке отчёта

@@ -484,4 +484,4 @@ def test_competitor_price_can_be_the_second_or_the_median_supplier():
     assert R.pick_offer(offers, "second").price == 130
     assert R.pick_offer(offers, "median").price == 130
     assert R.pick_offer(offers[:2], "median").price == 100
-    assert R.Options.from_dict({"price_pick": "чушь"}).price_pick == "min"
+    assert R.Options.from_dict({"price_pick": "чушь"}).price_pick == "median"

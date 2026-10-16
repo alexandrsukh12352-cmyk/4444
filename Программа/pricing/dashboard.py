@@ -232,6 +232,14 @@ def summary(rows: list[Row], opt: Options) -> dict:
     result["position"] = _position(rows, tol, ro.enabled, basis)
     result["bridge"] = _bridge(rows, basis) if ro.enabled else None
     result["weight_by"] = "qty" if any((r.sales_qty or 0) > 0 for r in rows) else "rub"
+    from .report import is_new, sold_recently
+
+    idle = [r for r in rows if not sold_recently(r) and not is_new(r)]
+    result["idle"] = len(idle)
+    result["idle_down"] = sum(1 for r in idle if r.rec and r.rec.kind == "down")
+    result["recent_sales"] = any(getattr(r, "sales3", None) is not None for r in rows)
+    result["frozen"] = sum(1 for r in rows if getattr(r, "frozen", ""))
+    result["changed"] = sum(1 for r in rows if getattr(r, "last_change", None))
     result["conclusions"] = conclusions(result)
     return result
 
@@ -327,12 +335,18 @@ def _change_hist(rows: list[Row]) -> dict:
 
 def _limits(rows: list[Row]) -> list[dict]:
     """Почему рекомендация такая: по тексту причины у каждого товара."""
-    found = {"band": 0, "free": 0, "capped": 0, "payback": 0, "vr": 0, "top": 0, "no_price": 0}
+    found = {"band": 0, "free": 0, "capped": 0, "payback": 0, "vr": 0, "top": 0, "idle": 0, "frozen": 0, "market": 0, "no_price": 0}
     for r in rows:
         if not r.rec:
             continue
         reason = r.rec.reason or ""
-        if reason.startswith("нет цены конкурента"):
+        if reason.startswith("цену меняли"):
+            found["frozen"] += 1
+        elif reason.startswith("нет продаж"):
+            found["idle"] += 1
+        elif "рынок ниже" in reason:
+            found["market"] += 1
+        elif reason.startswith("нет цены конкурента"):
             found["no_price"] += 1
         elif reason.startswith("в пределах позиционирования"):
             found["band"] += 1
@@ -349,7 +363,9 @@ def _limits(rows: list[Row]) -> list[dict]:
     titles = {
         "free": "дошли до цели", "capped": "упёрлись в лимит шага", "band": "уже в коридоре — не трогаем",
         "payback": "снижение не окупится — режем меньше",
-        "vr": "подняли до минимальной ВР", "top": "топ продаж (AA) — не снижаем", "no_price": "нет цены конкурента",
+        "vr": "подняли до минимальной ВР", "top": "топ продаж (AA) — не снижаем",
+        "idle": "нет продаж — не поднимаем", "frozen": "пауза после изменения цены",
+        "market": "ВР низкая, но рынок ниже — не поднимаем", "no_price": "нет цены конкурента",
     }
     return [{"key": k, "title": titles[k], "items": v} for k, v in found.items() if v]
 

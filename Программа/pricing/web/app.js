@@ -26,7 +26,7 @@ const S = {
   folder: "",
   opts: {
     brand: "", group: "", base: "pst", sources: {}, filters: {}, abc: [], cross_modes: {}, cross_split: "none",
-    price_source: "both", price_pick: "min", monitoring_only: true, in_stock_only: false, subgroup_mode: "sheets", suggest_threshold: 0.3,
+    price_source: "both", price_pick: "median", monitoring_only: true, in_stock_only: true, subgroup_mode: "sheets", suggest_threshold: 0.3,
     report_kind: "full", green_when: "above", rec: {}, ui: "template",
   },
   priceFiles: [],
@@ -188,6 +188,11 @@ async function start() {
   // «По шаблону» больше нет: всегда сохранённые настройки, стандарт — кнопкой «Сбросить к стандарту».
   if (o.custom && Object.keys(o.custom).length) applyCustom();
   else applyTemplate();
+  if ((S.opts.defaults_rev || 0) < DEFAULTS_REV) {
+    S.opts.price_pick = "median";
+    S.opts.in_stock_only = true;
+    S.opts.defaults_rev = DEFAULTS_REV;
+  }
   S.opts.filters = foldClearance(S.opts.filters);
   ensureStockProfiles();
   S.folder = S.init.folder;
@@ -213,8 +218,10 @@ async function start() {
 }
 
 const CUSTOM_KEYS = ["base", "sources", "filters", "abc", "cross_modes", "cross_split", "price_source", "price_pick",
-  "monitoring_only", "in_stock_only", "subgroup_mode", "suggest_threshold", "green_when"];
-const REC_NUMS = ["tolerance", "down", "min_vr", "top_factor", "mid_factor", "rounding", "max_lift"];
+  "monitoring_only", "in_stock_only", "subgroup_mode", "suggest_threshold", "green_when", "defaults_rev"];
+// 2 — цена конкурента по медиане поставщиков и только в наличии (аудит 16 окт).
+const DEFAULTS_REV = 2;
+const REC_NUMS = ["tolerance", "down", "min_vr", "top_factor", "mid_factor", "rounding", "max_lift", "cooldown"];
 
 function clone(value) {
   return value == null ? value : JSON.parse(JSON.stringify(value));
@@ -377,9 +384,10 @@ function applyTemplate() {
   S.opts.filters = {};
   S.opts.abc = [];
   S.opts.price_source = "both";
-  S.opts.price_pick = "min";
+  S.opts.price_pick = "median";
   S.opts.monitoring_only = true;
-  S.opts.in_stock_only = false;
+  S.opts.in_stock_only = true;
+  S.opts.defaults_rev = DEFAULTS_REV;
   S.opts.cross_split = "none";
   S.opts.cross_modes = {};
   S.opts.green_when = "above";
@@ -507,7 +515,7 @@ async function rescan(manual = false) {
   }
 }
 
-const OPTIONAL = new Set(["discounts", "gz", "positioning", "crosses", "sales", "sbs", "transit"]);
+const OPTIONAL = new Set(["discounts", "gz", "positioning", "crosses", "sales", "sales3", "sbs", "transit"]);
 
 function renderDirs() {
   const dirs = (S.scan && S.scan.dirs) || [];
@@ -1050,7 +1058,7 @@ function renderPriceControls() {
   const pick = $("#price-pick");
   if (pick) {
     pick.innerHTML = Object.entries(S.init.price_picks || { min: "Самая низкая" }).map(([k, t]) => `<button type="button" data-v="${k}">${esc(t)}</button>`).join("");
-    seg(pick, S.opts.price_pick || "min", (v) => { S.opts.price_pick = v; analyze(); });
+    seg(pick, S.opts.price_pick || "median", (v) => { S.opts.price_pick = v; analyze(); });
   }
   $("#monitoring-only").checked = S.opts.monitoring_only;
   $("#in-stock-only").checked = S.opts.in_stock_only;
@@ -2022,6 +2030,8 @@ const KNOBS = [
     hint: "Защита маржи: ниже — цену поднимаем, даже если рынок дешевле" },
   { key: "max_lift", title: "Снижать, только если окупится ростом продаж до", unit: "%", min: 0, max: 60, step: 1,
     hint: "Снижение на 8% при ВР 39% окупается, только если продажи вырастут на 26%. Глубже этого порога цену не режем. 0 — не проверять" },
+  { key: "cooldown", title: "После изменения цены не трогать", unit: "дней", min: 0, max: 180, step: 15,
+    hint: "Программа помнит, когда в ПСТ менялась цена. Пока продажи не ответили на прошлый шаг, новый не предлагаем. 0 — не ждать" },
 ];
 const ROUNDING = [1, 5, 10, 50, 100];
 
@@ -2280,9 +2290,13 @@ function attention(d) {
   if (dn && dn.items && dn.need_lift != null && dn.need_lift > 0.15) {
     out.push({ kind: "dn", text: `Снижения (${fmtInt(dn.items)} тов.) окупятся только при росте их продаж на ${fmtPct(dn.need_lift)}.` });
   }
+  if (d.frozen) out.push({ kind: "info", text: `${fmtInt(d.frozen)} ${plural(d.frozen, "товар", "товара", "товаров")} на паузе: цену в ПСТ меняли недавно, ждём, как ответят продажи.` });
+  if (d.rec_enabled && d.idle) {
+    out.push({ kind: "info", text: `${fmtInt(d.idle)} ${plural(d.idle, "товар", "товара", "товаров")} без продаж${d.recent_sales ? " за 3 месяца" : ""} — цену не поднимаем${d.idle_down ? `; ${fmtInt(d.idle_down)} с остатком дороже цели — снижаем` : ""}.` });
+  }
   const low = d.rec_enabled ? d.low_vr_rec : d.low_vr;
   if (low) out.push({ kind: "info", text: `${fmtInt(low)} ${plural(low, "товар", "товара", "товаров")} с ВР ниже ${fmtInt(d.min_vr)}%${d.rec_enabled ? " и после рекомендаций" : ""}.` });
-  return out.slice(0, 4);
+  return out.slice(0, 5);
 }
 
 function renderDash() {
@@ -2312,7 +2326,7 @@ function renderDash() {
   ];
   const notes = attention(d);
   const icon = { warn: "!", dn: "↓", up: "↑", info: "i" };
-  const limitColors = { free: "#0f4c5c", capped: "#d97706", band: "#98a2b3", vr: "#7c3aed", top: "#0891b2", payback: "#b3541e", no_price: "#cbd5e1" };
+  const limitColors = { free: "#0f4c5c", capped: "#d97706", band: "#98a2b3", vr: "#7c3aed", top: "#0891b2", payback: "#b3541e", idle: "#64748b", frozen: "#94a3b8", market: "#b42318", no_price: "#cbd5e1" };
   const limitRows = (d.limits || []).filter((x) => x.key !== "no_price");
   const limits = recOn && limitRows.length ? hbars(limitRows.map((x) => ({ label: x.title, value: x.items, color: limitColors[x.key] })), limitRows.reduce((n, x) => n + x.items, 0)) : "";
   const groupHead = (first) => (recOn

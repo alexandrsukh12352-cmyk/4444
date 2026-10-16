@@ -38,13 +38,14 @@ class RecOptions:
     mid_factor: float = 0.75
     rounding: float = 1.0  # шаг округления Кат. А, руб.
     max_lift: float = 20.0  # снижение окупается, только если продажи вырастут не больше чем на N %; 0 — не проверять
+    cooldown: float = 90.0  # после изменения цены в ПСТ не трогаем столько дней; 0 — не ждать
     priced_first: bool = True
 
     @classmethod
     def from_dict(cls, data: dict | None) -> "RecOptions":
         data = dict(data or {})
         known = {k: v for k, v in data.items() if k in cls.__dataclass_fields__}
-        for key in ("tolerance", "down", "min_vr", "top_factor", "mid_factor", "rounding", "max_lift"):
+        for key in ("tolerance", "down", "min_vr", "top_factor", "mid_factor", "rounding", "max_lift", "cooldown"):
             if known.get(key) not in (None, ""):
                 known[key] = float(known[key])
         if "enabled" in known:
@@ -67,7 +68,7 @@ def bundled_rec() -> dict:
     return {
         "tolerance": base.tolerance, "down": base.down, "min_vr": base.min_vr,
         "top_factor": base.top_factor, "mid_factor": base.mid_factor,
-        "rounding": base.rounding, "max_lift": base.max_lift, "up": dict(base.up),
+        "rounding": base.rounding, "max_lift": base.max_lift, "cooldown": base.cooldown, "up": dict(base.up),
     }
 
 
@@ -243,9 +244,21 @@ def is_core_abc(abc: str) -> bool:
 
 
 def recommend(cur: float | None, sbs: float | None, target: float | None, segment: str, weight: str,
-              opt: RecOptions, who: str = "", raise_cap: float | None = None, abc: str = "") -> Rec:
+              opt: RecOptions, who: str = "", raise_cap: float | None = None, abc: str = "",
+              sold: bool = True, stock: bool = True, new: bool = False, frozen: str = "") -> Rec:
+    """sold — были продажи за период; stock — есть остаток; new — новинка (у неё продаж ещё нет);
+    frozen — цену недавно меняли: текст причины, рекомендацию не даём."""
     if not cur:
         return Rec(None, None, "нет Кат. А", "none")
+    if frozen:
+        return Rec(cur, 0.0, frozen, "keep")
+    # Нет продаж: повышение прибыли не даст, а лежащий товар сделает ещё менее ходовым.
+    idle = not sold and not new
+    if idle and not stock:
+        return Rec(cur, 0.0, "нет продаж и нет остатка — цену не трогаем", "keep")
+    if idle and (not target or 1 - cur / target >= -opt.tolerance / 100):
+        why = "нет продаж, а мы не дороже цели — дело не в цене, нет спроса" if target else "нет продаж — цену не поднимаем"
+        return Rec(cur, 0.0, why, "keep")
     factor = {"top": opt.top_factor, "mid": opt.mid_factor}.get(weight, 1.0)
     up = opt.up.get(segment, opt.up.get(UNKNOWN, 5.0)) * factor / 100
     down = opt.down * factor / 100
@@ -254,6 +267,8 @@ def recommend(cur: float | None, sbs: float | None, target: float | None, segmen
     # raise_cap — доля. 0: оверсток и распродажа, цену не поднимаем. 0.02: Европа и Америка.
     if raise_cap is not None:
         up = min(up, max(raise_cap, 0.0))
+    if idle:
+        up = 0.0  # сюда доходит только товар без продаж с остатком, который дороже цели: только вниз
     floor = sbs / (1 - opt.min_vr / 100) if sbs and opt.min_vr < 100 else None
     notes = []
     if weight == "top":
@@ -279,7 +294,7 @@ def recommend(cur: float | None, sbs: float | None, target: float | None, segmen
             else:
                 limited = max(-down, min(up, change))
                 payback = ""
-                if limited < 0 and opt.max_lift > 0 and sbs and cur:
+                if limited < 0 and opt.max_lift > 0 and sbs and cur and not idle:
                     # Снижение на p при марже m окупается, если продажи вырастут на p / (m − p).
                     m = 1 - sbs / cur
                     lift = opt.max_lift / 100
@@ -295,6 +310,8 @@ def recommend(cur: float | None, sbs: float | None, target: float | None, segmen
                     price = cur * (1 + limited)
                     kind = "up" if limited > 0 else "down"
                     reason = f"к цели {who}".strip()
+                    if idle:
+                        reason = f"нет продаж, есть остаток, мы дороже цели — снижаем к цели {who}".strip()
                     if payback:
                         reason += f"; {payback}"
                     elif limited != change:
@@ -309,12 +326,19 @@ def recommend(cur: float | None, sbs: float | None, target: float | None, segmen
             price = min(cur, floor)
             kind = "keep" if price >= cur else "down"
             reason += f"; не ниже ВР {opt.min_vr:g}%"
+        elif target and cur >= target:
+            # Мы уже дороже рынка: тянуть цену к мин. ВР — уходить от рынка ещё дальше. Это вопрос к закупке.
+            reason += f"; ВР ниже {opt.min_vr:g}%, но рынок ниже — не поднимаем, вопрос к закупке"
         else:
             raised = min(floor, cur * (1 + up))
+            if target:
+                raised = min(raised, max(price, target))
             if raised > price:
                 price = raised
                 kind = "vr"
                 reason = f"ВР ниже {opt.min_vr:g}% — поднимаем" + (", упёрлись в лимит" if raised < floor else "")
+                if target and raised >= target and raised < floor:
+                    reason = f"ВР ниже {opt.min_vr:g}% — поднимаем до цели {who}, выше рынок не даёт".replace("  ", " ")
     price = _round(price, opt.rounding)
     if abs(price - cur) < max(opt.rounding, 0.01) / 2:
         price = cur  # та же цена до копейки: «Изм. %» ровно ноль

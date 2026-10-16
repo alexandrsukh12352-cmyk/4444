@@ -65,7 +65,7 @@ CROSS_SPLITS = {
     "subgroup_abc": "Подгруппы и ABC",
 }
 PRICE_SOURCES = {"acp": "АЦПКД", "prices": "Прайсы", "both": "АЦПКД и прайсы"}
-PRICE_PICKS = {"min": "Самая низкая", "second": "Вторая снизу", "median": "Медиана поставщиков"}
+PRICE_PICKS = {"median": "Медиана поставщиков", "second": "Вторая снизу", "min": "Самая низкая"}
 REPORT_KINDS = {"full": "Полный"}  # быстрого отчёта больше нет
 SUBGROUP_MODES = {"sheets": "Лист на подгруппу", "single": "Все на одном листе"}
 
@@ -135,6 +135,10 @@ class Row:
     pst: PstItem | None
     acp: AcpItem | None
     in_transit: float | None = None  # заказано, шт — из «Товар в пути», итог по городам
+    sales3: float | None = None  # продажи за последние месяцы, руб.; None — такой выгрузки нет
+    sales3_qty: float | None = None
+    frozen: str = ""  # цену недавно меняли — рекомендацию не даём (история цен)
+    last_change: dict | None = None  # последнее изменение Кат. А: дата, было, стало, чьё
     competitors: list = field(default_factory=list)  # bc.Competitor из позиционирования
     picks: dict[str, list[Pick]] = field(default_factory=dict)  # ключ конкурента -> кроссы
     prices: dict[str, float | None] = field(default_factory=dict)
@@ -176,9 +180,11 @@ class Options:
     cross_split: str = "none"
     cross_modes: dict[str, str] = field(default_factory=dict)  # «КОНКУРЕНТ|сегмент» -> режим
     price_source: str = "both"
-    price_pick: str = "min"  # min — самая низкая; second — вторая снизу; median — медиана по поставщикам
+    price_pick: str = "median"  # min — самая низкая; second — вторая снизу; median — медиана по поставщикам
     monitoring_only: bool = True
-    in_stock_only: bool = False
+    history: bool = True  # история цен: прошлое изменение и пауза после него
+    history_write: bool = False  # записывать увиденные цены и продажи (окно программы); тесты — только читают
+    in_stock_only: bool = True  # цена поставщика без остатка (0 шт) не берётся; если остатка в прайсе нет — берётся
     subgroup_mode: str = "sheets"
     suggest_threshold: float = 0.3
     report_kind: str = "full"  # единственный вид; старое «quick» в настройках читается как полный
@@ -197,7 +203,7 @@ class Options:
         if opt.price_source not in PRICE_SOURCES:
             opt.price_source = "both"
         if opt.price_pick not in PRICE_PICKS:
-            opt.price_pick = "min"
+            opt.price_pick = "median"
         if opt.report_kind not in REPORT_KINDS:
             opt.report_kind = "full"
         # Отчёт строится только от ПСТ: вариант «АЦПКД + столбцы из ПСТ» убран.
@@ -446,6 +452,7 @@ def _build_rows(src: Sources, settings: Settings, opt: Options, positioning) -> 
         base = [(p, src.acp.get(p.code)) for p in src.pst]
 
     rows = []
+    recent = bool(src.located("sales3"))
     for p, a in base:
         it = p or a
         if brand and norm_text(it.brand) != brand or group and norm_text(it.group) != group:
@@ -501,6 +508,9 @@ def _build_rows(src: Sources, settings: Settings, opt: Options, positioning) -> 
             acp=a,
         )
         row.cat_a_calc = cat_a_own is not None and row.cat_a == cat_a_own
+        if recent:
+            row.sales3 = src.sales3.get(it.code, 0.0)
+            row.sales3_qty = src.sales3_qty.get(it.code, 0.0) if src.sales3_qty else None
         if not _subgroup_in_positioning(positioning, it.brand, it.group, subgroup):
             continue
         _, _, row.competitors, _ = positioning.resolve(row.brand, row.group, row.subgroup)
@@ -1251,6 +1261,15 @@ def prepare(src: Sources, settings: Settings, opt: Options, price_files: list[Pr
 
     screened = screen_pairs(kept, settings)
     kept, dropped_price = apply_filters(kept, opt, with_prices=True)
+    if opt.history:
+        from .pricehistory import annotate, observe
+
+        if opt.history_write:
+            try:
+                observe(kept)
+            except Exception:  # noqa: BLE001 — история не должна мешать отчёту
+                pass
+        annotate(kept, opt.recs.cooldown)
     apply_recommendations(kept, opt)
     kept.sort(key=lambda r: (-(r.sales_qty or 0), -(r.sales or 0), r.article))
     apply_sisters(kept, src)
@@ -1321,7 +1340,23 @@ def apply_recommendations(rows: list[Row], opt: Options) -> None:
             r.rec = recommend(
                 r.cat_a, r.sbs if r.sbs is not None else r.sbs_plan, r.target, segment, r.weight, ro,
                 r.target_by, cap, r.abc,
+                sold=sold_recently(r),
+                stock=bool((getattr(r, "stock", None) or 0) > 0 or (getattr(r, "in_transit", None) or 0) > 0),
+                new=is_new(r), frozen=getattr(r, "frozen", "") or "",
             )
+
+
+def sold_recently(r) -> bool:
+    """Продавался ли товар: по продажам за 3 месяца, если такая выгрузка есть, иначе за весь период."""
+    recent = getattr(r, "sales3", None)
+    if recent is not None:
+        return bool(recent > 0 or (getattr(r, "sales3_qty", None) or 0) > 0)
+    return bool((getattr(r, "sales_qty", None) or 0) > 0 or (getattr(r, "sales", None) or 0) > 0)
+
+
+def is_new(r) -> bool:
+    """Новинка: тип ассортимента N или категория ABC «NEW». У неё продаж ещё нет — это не повод её не трогать."""
+    return (getattr(r, "assortment", "") or "").upper() == "N" or (getattr(r, "abc", "") or "").strip().upper() == "NEW"
 
 
 # ---------------------------------------------------------------- книга

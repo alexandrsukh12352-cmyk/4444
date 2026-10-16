@@ -20,12 +20,12 @@ from . import style
 from .style import argb
 
 NUM = ">-1E+99"  # условие SUMIFS / COUNTIFS «ячейка — число»
-MONEY0 = '#,##0;-#,##0;"—"'
+MONEY0 = '#,##0;-#,##0;""'
 MONEY = '#,##0.00'
-SIGNED_RUB = '+#,##0" ₽";-#,##0" ₽";"0 ₽"'
+SIGNED_RUB = '+#,##0;-#,##0;0'
 PCT1 = '0.0%;-0.0%;0.0%'
 PCT1S = '+0.0%;-0.0%;0.0%'
-SHARE = '0%;-0%;"—"'
+SHARE = '0%;-0%;""'
 INT = '#,##0'
 
 INK = Font(name=style.FONT, color=style.INK)
@@ -153,242 +153,412 @@ def no_price_reason(r) -> str:
     return "нет кросса на конкурентов из позиционирования"
 
 
-def write_summary_sheet(ws, rows, infos, opt, src, title: str, summary: dict) -> None:
-    """Итоги группы. rows — товары отчёта, summary — dashboard.summary по ним."""
+def _headline(title: str, summary: dict, rec: bool) -> str:
+    """Заголовок листа — вывод, а не название: прибыль и где мы против главного конкурента."""
+    bits = []
+    if rec and summary.get("profit") is not None and summary.get("profit_rec") is not None:
+        delta = (summary["profit_rec"] - summary["profit"]) / 1e6
+        bits.append(f"{delta:+.1f} млн ₽ прибыли после рекомендаций".replace(".", ",").replace("-", "−"))
+    elif summary.get("vr") is not None:
+        bits.append(f"ВР {summary['vr'] * 100:.1f}%".replace(".", ","))
+    comps = [s for s in summary.get("slices") or [] if s.get("kind") == "comp" and s.get("n")]
+    if comps:
+        main = max(comps, key=lambda s: s["n"])
+        gap = main.get("weighted") if main.get("weighted") is not None else main.get("median")
+        name = str(main["title"]).replace(" (без учёта % позиц.)", "").replace("Против ", "")
+        if gap is not None and abs(gap) >= 0.005:
+            side = "дешевле" if gap > 0 else "дороже"
+            bits.append(f"мы {side} {name} на {abs(gap) * 100:.0f}%")
+        elif gap is not None:
+            bits.append(f"мы вровень с {name}")
+    return f"{title}: " + ", ".join(bits) if bits else title
+
+
+def _chart_data(ws, summary: dict, rec: bool, min_vr: float) -> dict:
+    """Скрытый лист с числами для графиков (снимок на момент формирования). Возвращает диапазоны."""
+    ws.sheet_state = "hidden"
+    out = {}
+    row = 1
+
+    def block(name: str, head: list, rows: list, fmt: str = "0%;-0%;") -> tuple[int, int]:
+        nonlocal row
+        ws.cell(row, 1, name).font = BOLD
+        for j, h in enumerate(head):
+            ws.cell(row + 1, 1 + j, h)
+        for i, values in enumerate(rows):
+            for j, v in enumerate(values):
+                c = ws.cell(row + 2 + i, 1 + j, v)
+                if j:
+                    c.number_format = fmt
+        first, last = row + 1, row + 1 + len(rows)
+        row = last + 2
+        return first, last
+
+    comps = [s for s in summary.get("slices") or [] if s.get("kind") == "comp" and s.get("n")]
+    if comps:
+        data = []
+        for s in comps:
+            name = str(s["title"]).replace(" (без учёта % позиц.)", "").replace("Против ", "")
+            now = s.get("weighted") if s.get("weighted") is not None else s.get("median")
+            after = s.get("weighted_rec") if s.get("weighted_rec") is not None else s.get("median_rec")
+            data.append([f"{name} ({s['n']} тов.)", now, after if rec else None, s.get("target_dev")])
+        out["comp"] = block("Мы против конкурентов", ["Конкурент", "Сейчас", "После", "Цель"], data, "+0%;-0%;0%")
+    bridge = summary.get("bridge") if rec else None
+    if bridge:
+        up, down = bridge["up"]["delta"] / 1e6, bridge["down"]["delta"] / 1e6
+        net = up + down
+        # Водопад в Excel 2016 — столбцы с накоплением: невидимое основание и шаг.
+        data = [["Повышения", 0, up, 0, 0], ["Снижения", min(up, net), 0, -down, 0], ["Итог", 0, 0, 0, net]]
+        out["bridge"] = block("Откуда прибыль, млн ₽", ["Шаг", "Основание", "Рост", "Снижение", "Итог"], data, "#,##0.0;-#,##0.0;")
+        out["bridge_ok"] = up >= 0 and net >= 0 and down <= 0
+    pos = summary.get("position") or {}
+    if pos.get("now"):
+        def shares(parts):
+            total = sum(p["sale"] for p in parts) or 1
+            by = {p["key"]: p["sale"] / total for p in parts}
+            return [by.get("no_price", 0), sum(v for k, v in by.items() if k.startswith("d")), by.get("band", 0),
+                    sum(v for k, v in by.items() if k.startswith("c"))]
+        data = [["Сейчас", *shares(pos["now"])]]
+        if rec and pos.get("after"):
+            data.append(["После", *shares(pos["after"])])
+        out["pos"] = block("Позиция к цели, доля выручки", ["", "Нет цены конкурента", "Дороже цели", "В коридоре", "Дешевле цели"], data)
+    abc = [x for x in summary.get("abc") or [] if x.get("items") and x.get("vr") is not None]
+    if abc:
+        data = [[x["name"] or "пусто", x["vr"], x["vr_rec"] if rec else None, min_vr / 100] for x in abc]
+        out["abc"] = block("ВР по ABC", ["ABC", "Сейчас", "После", "Мин. ВР"], data)
+    for col in "ABCDE":
+        ws.column_dimensions[col].width = 22 if col == "A" else 12
+    return out
+
+
+GREY, BLUE, DARK = "A6A6A6", "2F6EBA", "404040"
+GREEN, RED = "7FB069", "D9776A"
+
+
+def _series_style(series, color: str, line: bool = False, dash: bool = False, none: bool = False) -> None:
+    from openpyxl.drawing.line import LineProperties
+
+    gp = series.graphicalProperties
+    if none:
+        gp.noFill = True
+        gp.line = LineProperties(noFill=True)
+        return
+    if line:
+        gp.line = LineProperties(solidFill=color, w=19050, prstDash="dash" if dash else "solid")
+        return
+    gp.solidFill = color
+    gp.line = LineProperties(solidFill=color)
+
+
+def _title(chart, text: str) -> None:
+    """Заголовок графика 11 пт, не жирный в 14 пт, как ставит Excel по умолчанию."""
+    from openpyxl.chart.text import RichText, Text
+    from openpyxl.chart.title import Title
+    from openpyxl.drawing.text import CharacterProperties, Paragraph, ParagraphProperties, RegularTextRun
+
+    props = CharacterProperties(sz=1100, b=True, solidFill="404040")
+    run = RegularTextRun(rPr=props, t=text)
+    chart.title = Title(tx=Text(rich=RichText(p=[Paragraph(pPr=ParagraphProperties(defRPr=props), r=[run])])), overlay=False)
+
+
+def _quiet_axes(chart, pct: bool = False, fmt: str | None = None) -> None:
+    chart.y_axis.majorGridlines = None
+    chart.legend.position = "b"
+    chart.y_axis.delete = False
+    chart.x_axis.delete = False
+    if pct:
+        chart.y_axis.numFmt = "0%"
+    if fmt:
+        chart.y_axis.numFmt = fmt
+
+
+def _charts(ws, data_ws, ranges: dict, rec: bool, anchors: list[str]) -> None:
+    from openpyxl.chart import BarChart, LineChart, Reference
+    from openpyxl.chart.label import DataLabelList
+
+    spots = iter(anchors)
+    W, H = 12.6, 7.2
+    if "comp" in ranges:
+        first, last = ranges["comp"]
+        ch = BarChart()
+        ch.type = "bar"
+        ch.grouping = "clustered"
+        _title(ch, "Мы против конкурентов, плюс — мы дешевле")
+        if rec:
+            ch.add_data(Reference(data_ws, min_col=2, max_col=4, min_row=first, max_row=last), titles_from_data=True)
+        else:
+            ch.add_data(Reference(data_ws, min_col=2, max_col=2, min_row=first, max_row=last), titles_from_data=True)
+            ch.add_data(Reference(data_ws, min_col=4, max_col=4, min_row=first, max_row=last), titles_from_data=True)
+        ch.set_categories(Reference(data_ws, min_col=1, min_row=first + 1, max_row=last))
+        colors = [GREY, BLUE, DARK] if rec else [GREY, DARK]
+        for s, c in zip(ch.series, colors):
+            _series_style(s, c)
+        ch.gapWidth = 60
+        ch.x_axis.scaling.orientation = "maxMin"
+        ch.x_axis.tickLblPos = "low"  # подписи слева, а не у нуля поверх столбцов
+        _quiet_axes(ch, pct=True)
+        ch.width, ch.height = W, H
+        ws.add_chart(ch, next(spots))
+    if "bridge" in ranges and ranges.get("bridge_ok"):
+        first, last = ranges["bridge"]
+        ch = BarChart()
+        ch.type = "col"
+        ch.grouping = "stacked"
+        ch.overlap = 100
+        _title(ch, "Откуда прибыль, млн ₽, при тех же продажах")
+        ch.add_data(Reference(data_ws, min_col=2, max_col=5, min_row=first, max_row=last), titles_from_data=True)
+        ch.set_categories(Reference(data_ws, min_col=1, min_row=first + 1, max_row=last))
+        _series_style(ch.series[0], "FFFFFF", none=True)
+        for s, c in zip(ch.series[1:], [GREEN, RED, GREY]):
+            _series_style(s, c)
+            s.dLbls = DataLabelList()
+            s.dLbls.showVal = True
+            s.dLbls.showSerName = s.dLbls.showCatName = s.dLbls.showLegendKey = False
+        ch.gapWidth = 60
+        _quiet_axes(ch, fmt="#,##0.0")
+        ch.legend = None
+        ch.width, ch.height = W, H
+        ws.add_chart(ch, next(spots))
+    if "pos" in ranges:
+        first, last = ranges["pos"]
+        ch = BarChart()
+        ch.type = "bar"
+        ch.grouping = "percentStacked"
+        ch.overlap = 100
+        _title(ch, "Позиция к цели, доля выручки")
+        ch.add_data(Reference(data_ws, min_col=2, max_col=5, min_row=first, max_row=last), titles_from_data=True)
+        ch.set_categories(Reference(data_ws, min_col=1, min_row=first + 1, max_row=last))
+        for s, c in zip(ch.series, ["D9D9D9", RED, GREEN, BLUE]):
+            _series_style(s, c)
+            s.dLbls = DataLabelList()
+            s.dLbls.showVal = True
+            s.dLbls.showSerName = s.dLbls.showCatName = s.dLbls.showLegendKey = False
+        ch.gapWidth = 50
+        ch.x_axis.scaling.orientation = "maxMin"
+        _quiet_axes(ch, pct=True)
+        ch.width, ch.height = W, H
+        ws.add_chart(ch, next(spots))
+    if "abc" in ranges:
+        first, last = ranges["abc"]
+        bar = BarChart()
+        bar.type = "col"
+        bar.grouping = "clustered"
+        _title(bar, "ВР по ABC: сейчас и после")
+        bar.add_data(Reference(data_ws, min_col=2, max_col=3 if rec else 2, min_row=first, max_row=last), titles_from_data=True)
+        bar.set_categories(Reference(data_ws, min_col=1, min_row=first + 1, max_row=last))
+        for s, c in zip(bar.series, [GREY, BLUE]):
+            _series_style(s, c)
+        line = LineChart()
+        line.add_data(Reference(data_ws, min_col=4, max_col=4, min_row=first, max_row=last), titles_from_data=True)
+        _series_style(line.series[0], RED, line=True, dash=True)
+        line.series[0].marker.symbol = "none"
+        bar.gapWidth = 80
+        _quiet_axes(bar, pct=True)
+        bar += line
+        bar.width, bar.height = W, H
+        ws.add_chart(bar, next(spots))
+
+
+MLN = '#,##0.0,,;-#,##0.0,,;""'
+HEAD_LINE = Border(bottom=Side(style="medium", color=argb("404040")))
+TOTAL_LINE = Border(top=Side(style="thin", color=argb("404040")))
+
+
+def _plain_header(ws, row: int, titles: list[str], first_col: int = 2) -> None:
+    """Шапка как у человека: жирный текст, линия снизу, без заливки."""
+    for i, t in enumerate(titles):
+        c = ws.cell(row, first_col + i, t)
+        c.font = Font(name=style.FONT, bold=True, color=style.INK, size=10)
+        c.border = HEAD_LINE
+        c.alignment = Alignment(horizontal="left" if i == 0 else "right", vertical="bottom", wrap_text=True)
+    ws.row_dimensions[row].height = 30
+
+
+def write_summary_sheet(ws, rows, infos, opt, src, title: str, summary: dict, data_ws=None) -> None:
+    """Первый лист: вывод, четыре цифры, четыре графика Excel, короткая таблица и два списка."""
     ro = opt.recs
-    tol = ro.tolerance / 100
     a = Across(infos)
     rec = ro.enabled and a.has("rec")
-    pos = a.has("gap")
     ws.sheet_view.showGridLines = False
     ws.sheet_view.zoomScale = 90
     ws.sheet_properties.tabColor = argb("0F4C5C")
-    widths = {"A": 2, "B": 40, "C": 12, "D": 10, "E": 16, "F": 9, "G": 9, "H": 15, "I": 15, "J": 14,
-              "K": 8, "L": 8, "M": 10, "N": 10, "O": 10, "P": 10}
+    widths = {"A": 2, "B": 34, "C": 11, "D": 11, "E": 11, "F": 11, "G": 11, "H": 11, "I": 11, "J": 11, "K": 11, "L": 11, "M": 11}
     for col, w in widths.items():
         ws.column_dimensions[col].width = w
 
-    _cell(ws, "B2", f"{title} — итоги", font=Font(name=style.FONT, size=16, bold=True, color=style.ACCENT))
-    ws.row_dimensions[2].height = 26
-    bits = [f"сформирован {dt.datetime.now():%d.%m.%Y %H:%M}"]
+    _cell(ws, "B2", _headline(title, summary, rec), font=Font(name=style.FONT, size=15, bold=True, color=style.INK))
+    ws.row_dimensions[2].height = 24
+    bits = [f"{dt.datetime.now():%d.%m.%Y}"]
     if getattr(src, "sales_period", ""):
-        bits.append(f"продажи: {src.sales_period}")
+        bits.append(f"продажи {src.sales_period}")
+    if getattr(src, "sales3_period", "") or getattr(src, "sales3", None):
+        bits.append(f"продажи за 3 мес. {getattr(src, 'sales3_period', '')}".strip())
     from .report import PRICE_PICKS, PRICE_SOURCES
 
     bits.append(f"цены конкурентов: {PRICE_SOURCES.get(opt.price_source, opt.price_source)}, "
-                f"{PRICE_PICKS.get(getattr(opt, 'price_pick', 'min'), '').lower()}")
-    bits.append("суммы с потенциала" if opt.money_base == "potential" else "суммы с продаж")
+                f"{PRICE_PICKS.get(getattr(opt, 'price_pick', 'median'), '').lower()}")
     _cell(ws, "B3", " · ".join(bits), font=MUTED)
 
-    # ---- четыре цифры
+    # ---- четыре цифры: формулы по листам отчёта
     sale = a.sum("sum_sale", None)
     profit = a.sum("sum_profit", None)
     sale_vr = a.sum("sum_sale", None, ("vr", f'"{NUM}"'))
     vr_now = f'IFERROR({profit}/{sale_vr},"")'
+    items = a.rows(None)
+    priced_sale = a.sum("sum_sale", None, ("target", f'"{NUM}"')) if a.has("target") else "0"
+    priced_items = a.count("target", None) if a.has("target") else "0"
     if rec:
         profit_r = a.sum("sum_profit_rec", None)
         sale_vr_r = a.sum("sum_sale_rec", None, ("vr_rec", f'"{NUM}"'))
         vr_rec = f'IFERROR({profit_r}/{sale_vr_r},"")'
         ups = a.count("change", None, '">0.0005"')
         downs = a.count("change", None, '"<-0.0005"')
-    items = a.rows(None)
-    priced_sale = a.sum("sum_sale", None, ("target", f'"{NUM}"')) if a.has("target") else "0"
-    priced_items = a.count("target", None) if a.has("target") else "0"
+    # Числа и подписи — в разных ячейках: кириллица и длинное тире в формате числа ломают styles.xml в Excel 2016.
     cards = [
-        ("ВР группы", f"={vr_now}", PCT1,
-         f'=IFERROR({vr_rec},"")' if rec else None, '"после рекомендаций: "0.0%' if rec else None),
-        ("Прибыль", f"={profit}", MONEY0,
-         f'={profit_r}-{profit}' if rec else None, '"после рекомендаций: "+#,##0" ₽";"после рекомендаций: "-#,##0" ₽";"без изменений"' if rec else None),
-        ("Выручка с ценой конкурента", f'=IFERROR({priced_sale}/{sale},0)', SHARE,
-         f'={priced_items}', '"товаров с ценой: "#,##0'),
-        ("Двигаем цены", f'="↑ "&{ups}&"   ↓ "&{downs}' if rec else "рекомендации выключены", None,
-         f"={items}-{ups}-{downs}" if rec else None, '"не трогаем: "#,##0' if rec else None),
+        ("B", "C", "ВР группы", f"={vr_now}", "0.0%", "после рекомендаций:" if rec else "", f"={vr_rec}" if rec else None, "0.0%"),
+        ("D", "F", "Прибыль, млн ₽", f"={profit_r}-{profit}" if rec else f"={profit}", "+#,##0.0,,;-#,##0.0,,;0" if rec else "#,##0.0,,",
+         "сейчас:" if rec else "", f"={profit}" if rec else None, "#,##0.0,,"),
+        ("G", "I", "С ценой конкурента, % выручки", f"=IFERROR({priced_sale}/{sale},0)", "0%", "товаров:", f"={priced_items}", "#,##0"),
+        ("J", "L", "Цены вверх / вниз", f'={ups}&" / "&{downs}' if rec else "рекомендации выключены", None,
+         "не трогаем:" if rec else "", f"={items}-{ups}-{downs}" if rec else None, "#,##0"),
     ]
-    starts = ["B", "E", "H", "K"]
-    ends = {"B": "D", "E": "G", "H": "J", "K": "M"}
-    for col, (label, value, fmt, note, note_fmt) in zip(starts, cards):
-        end = ends[col]
+    line = Side(style="thin", color=argb("BFBFBF"))
+    for col, end, label, value, fmt, note, note_value, note_fmt in cards:
         for r in (5, 6, 7):
-            ws.merge_cells(f"{col}{r}:{end}{r}")
-            first = ws[f"{col}{r}"]
-            first.fill = CARD_FILL
             for i in range(ord(col), ord(end) + 1):
-                c = ws[f"{chr(i)}{r}"]
-                c.fill = CARD_FILL
-                c.border = Border(left=LINE if chr(i) == col else None, right=LINE if chr(i) == end else None,
-                                  top=LINE if r == 5 else None, bottom=LINE if r == 7 else None)
-        _cell(ws, f"{col}5", label, font=Font(name=style.FONT, size=10, color=style.MUTED), fill=CARD_FILL,
-              align=Alignment(indent=1, vertical="bottom"))
+                ws[f"{chr(i)}{r}"].border = Border(left=line if chr(i) == col else None, right=line if chr(i) == end else None,
+                                                   top=line if r == 5 else None, bottom=line if r == 7 else None)
+        _cell(ws, f"{col}5", label, font=Font(name=style.FONT, size=10, color=style.MUTED), align=Alignment(indent=1, vertical="bottom"))
         big = isinstance(value, str) and value.startswith("=")
-        _cell(ws, f"{col}6", value, fmt, Font(name=style.FONT, size=18 if big else 11, bold=big,
-                                                 color=style.ACCENT if big else style.MUTED),
-              CARD_FILL, Alignment(indent=1, vertical="center", horizontal="left"))
-        _cell(ws, f"{col}7", note, note_fmt, Font(name=style.FONT, size=10, color=style.MUTED), CARD_FILL,
-              Alignment(indent=1, vertical="top", horizontal="left"))
+        _cell(ws, f"{col}6", value, fmt, Font(name=style.FONT, size=18 if big else 11, bold=big, color=style.INK if big else style.MUTED),
+              align=Alignment(indent=1, vertical="center", horizontal="left"))
+        _cell(ws, f"{col}7", note, None, Font(name=style.FONT, size=10, color=style.MUTED), align=Alignment(indent=1, vertical="top"))
+        if note_value is not None:
+            nxt = chr(ord(col) + 1)
+            _cell(ws, f"{nxt}7", note_value, note_fmt, Font(name=style.FONT, size=10, color=style.MUTED),
+                  align=Alignment(vertical="top", horizontal="right" if col == "B" else "left"))
     ws.row_dimensions[5].height = 18
     ws.row_dimensions[6].height = 30
     ws.row_dimensions[7].height = 18
 
-    # ---- по подгруппам
-    row = 9
-    subgroups = list(dict.fromkeys(r.subgroup for r in rows))
-    _section(ws, row, "По подгруппам",
-             "ВР — по товарам с себестоимостью. Позиция к цели — доля выручки: дороже цели, в коридоре "
-             f"±{ro.tolerance:g}%, дешевле, без цены конкурента. Всё — формулы по листам отчёта.")
-    titles = ["Подгруппа", "Товаров", "С ценой конк.", "Сумма продажи", "ВР"]
-    if rec:
-        titles += ["ВР после", "Прибыль", "Прибыль после", "Δ прибыли", "↑", "↓"]
+    # ---- четыре графика: числа на скрытом листе «Графики»
+    if data_ws is not None:
+        ranges = _chart_data(data_ws, summary, rec, ro.min_vr)
+        _charts(ws, data_ws, ranges, rec, ["B9", "G9", "B25", "G25"])
+        _cell(ws, "B41", "Графики — на момент формирования. Цифры сверху и таблица ниже пересчитываются, если поправить цену на листе отчёта.", font=MUTED)
+        row = 43
     else:
-        titles += ["Прибыль"]
-    if pos:
-        titles += ["Дороже цели", "В коридоре", "Дешевле цели", "Без цены"]
-    head = row + 2
-    _header(ws, head, titles)
+        row = 9
+
+    # ---- короткая таблица по подгруппам
+    subgroups = list(dict.fromkeys(r.subgroup for r in rows))
+    _cell(ws, f"B{row}", "По подгруппам", font=Font(name=style.FONT, size=12, bold=True, color=style.INK))
+    titles = ["Подгруппа", "Товаров", "Выручка, млн ₽", "ВР"]
+    if rec:
+        titles += ["ВР после", "Прибыль, млн ₽", "Δ прибыли, млн ₽", "Вверх", "Вниз"]
+    else:
+        titles += ["Прибыль, млн ₽"]
+    titles += ["С ценой конк."]
+    head = row + 1
+    _plain_header(ws, head, titles)
     lines = ([(sg or "без подгруппы", sg) for sg in subgroups] if len(subgroups) > 1 else []) + [("Итого", None)]
     for i, (label, sg) in enumerate(lines):
         n = head + 1 + i
         total = sg is None
         font = BOLD if total else INK
-        fill = TOTAL_FILL if total else None
-        vals: list[tuple[str | None, str | None]] = []
         s_sale = a.sum("sum_sale", sg)
         s_profit = a.sum("sum_profit", sg)
         s_vr = a.sum("sum_sale", sg, ("vr", f'"{NUM}"'))
-        vals.append((f"={a.rows(sg)}", INT))
-        vals.append((f"={a.count('target', sg)}" if a.has("target") else 0, INT))
-        vals.append((f"={s_sale}", MONEY0))
-        vals.append((f'=IFERROR({s_profit}/{s_vr},"")', PCT1))
+        vals = [(f"={a.rows(sg)}", INT), (f"={s_sale}", MLN), (f'=IFERROR({s_profit}/{s_vr},"")', "0.0%")]
         if rec:
             p_r = a.sum("sum_profit_rec", sg)
             s_vr_r = a.sum("sum_sale_rec", sg, ("vr_rec", f'"{NUM}"'))
-            vals.append((f'=IFERROR({p_r}/{s_vr_r},"")', PCT1))
-            vals.append((f"={s_profit}", MONEY0))
-            vals.append((f"={p_r}", MONEY0))
-            vals.append((f"={p_r}-{s_profit}", '+#,##0;-#,##0;0'))
-            vals.append((f"={a.count('change', sg, chr(34) + '>0.0005' + chr(34))}", INT))
-            vals.append((f"={a.count('change', sg, chr(34) + '<-0.0005' + chr(34))}", INT))
+            vals += [(f'=IFERROR({p_r}/{s_vr_r},"")', "0.0%"), (f"={s_profit}", MLN),
+                     (f"={p_r}-{s_profit}", '+#,##0.0,,;-#,##0.0,,;""'),
+                     (f"={a.count('change', sg, chr(34) + '>0.0005' + chr(34))}", INT),
+                     (f"={a.count('change', sg, chr(34) + '<-0.0005' + chr(34))}", INT)]
         else:
-            vals.append((f"={s_profit}", MONEY0))
-        if pos:
-            dear = a.sum("sum_sale", sg, ("gap", f'"<"&{-tol}'))
-            band = a.sum("sum_sale", sg, ("gap", f'">="&{-tol}'), ("gap", f'"<="&{tol}'))
-            cheap = a.sum("sum_sale", sg, ("gap", f'">"&{tol}'))
-            for part in (dear, band, cheap):
-                vals.append((f'=IFERROR({part}/{s_sale},"")', SHARE))
-            vals.append((f'=IFERROR(1-({dear}+{band}+{cheap})/{s_sale},"")', SHARE))
-        _cell(ws, f"B{n}", label, font=font, fill=fill)
-        ws[f"B{n}"].border = ROW_BORDER
+            vals.append((f"={s_profit}", MLN))
+        priced = a.sum("sum_sale", sg, ("target", f'"{NUM}"')) if a.has("target") else "0"
+        vals.append((f'=IFERROR({priced}/{s_sale},"")', "0%"))
+        c = ws.cell(n, 2, label)
+        c.font = font
+        if total:
+            c.border = TOTAL_LINE
         for j, (v, fmt) in enumerate(vals):
             c = ws.cell(n, 3 + j, v)
-            c.number_format = fmt or "General"
+            c.number_format = fmt
             c.font = font
-            c.border = ROW_BORDER
-            if fill is not None:
-                c.fill = fill
-        ws.row_dimensions[n].height = 18
+            c.alignment = Alignment(horizontal="right")
+            if total:
+                c.border = TOTAL_LINE
     last = head + len(lines)
-    if rec:
-        # ВР после — синим, если выше; Δ прибыли — зелёным / красным
-        g = get_column_letter(7)
-        ws.conditional_formatting.add(f"{g}{head + 1}:{g}{last}", FormulaRule(
-            formula=[f"AND(ISNUMBER({g}{head + 1}),ISNUMBER(F{head + 1}),{g}{head + 1}>F{head + 1}+0.0005)"], font=Font(color=argb("1D5FA8"), bold=True)))
-        d = get_column_letter(10)
-        ws.conditional_formatting.add(f"{d}{head + 1}:{d}{last}", FormulaRule(
-            formula=[f"AND(ISNUMBER({d}{head + 1}),{d}{head + 1}>0)"], font=Font(color=argb("15803D"), bold=True)))
-        ws.conditional_formatting.add(f"{d}{head + 1}:{d}{last}", FormulaRule(
-            formula=[f"AND(ISNUMBER({d}{head + 1}),{d}{head + 1}<0)"], font=Font(color=argb("B91C1C"), bold=True)))
-    vr_col = "F"
+    vr_col = "E"
     ws.conditional_formatting.add(f"{vr_col}{head + 1}:{vr_col}{last}", FormulaRule(
         formula=[f"AND(ISNUMBER({vr_col}{head + 1}),{vr_col}{head + 1}<{ro.min_vr / 100})"], font=Font(color=argb("C2410C"), bold=True)))
-    if pos:
-        first_pos = 3 + (10 if rec else 5)
-        dear_col = get_column_letter(first_pos)
-        ws.conditional_formatting.add(f"{dear_col}{head + 1}:{dear_col}{last}", FormulaRule(
-            formula=[f"AND(ISNUMBER({dear_col}{head + 1}),{dear_col}{head + 1}>=0.2)"], fill=DEAR_FILL))
-        cheap_col = get_column_letter(first_pos + 2)
-        ws.conditional_formatting.add(f"{cheap_col}{head + 1}:{cheap_col}{last}", FormulaRule(
-            formula=[f"AND(ISNUMBER({cheap_col}{head + 1}),{cheap_col}{head + 1}>=0.2)"], fill=CHEAP_FILL))
-        none_col = get_column_letter(first_pos + 3)
-        ws.conditional_formatting.add(f"{none_col}{head + 1}:{none_col}{last}", FormulaRule(
-            formula=[f"AND(ISNUMBER({none_col}{head + 1}),{none_col}{head + 1}>=0.5)"], font=Font(color=argb("C2410C"), bold=True)))
+    if rec:
+        d = "H"
+        ws.conditional_formatting.add(f"{d}{head + 1}:{d}{last}", FormulaRule(
+            formula=[f"AND(ISNUMBER({d}{head + 1}),{d}{head + 1}<0)"], font=Font(color=argb("B91C1C"), bold=True)))
     row = last + 2
 
     where = _locate(infos)
     letters_of = {i.title: i.letters for i in infos}
-
-    # ---- что сильнее меняет прибыль
     changes = (summary.get("top_changes") or [])[:10] if rec else []
     if changes:
-        _section(ws, row, "Что сильнее меняет прибыль",
-                 "Десять товаров с самым большим изменением прибыли при тех же продажах. Цены — ссылки на лист отчёта.")
-        head = row + 2
-        _header(ws, head, ["Разновидность", "Артикул", "ABC", "Кат. А", "Рек. кат. А", "Изм.", "Δ прибыли", "Почему"], height=22)
-        ws.merge_cells(start_row=head, start_column=9, end_row=head, end_column=16)
+        _cell(ws, f"B{row}", "Что сильнее меняет прибыль", font=Font(name=style.FONT, size=12, bold=True, color=style.INK))
+        head = row + 1
+        _plain_header(ws, head, ["Разновидность", "Артикул", "ABC", "Кат. А", "Рек.", "Изм.", "Δ прибыли, тыс. ₽", "Почему"])
+        ws.cell(head, 9).alignment = Alignment(horizontal="left", vertical="bottom")
         by_code = {r.code: r for r in rows}
         for i, t in enumerate(changes):
             n = head + 1 + i
             r = by_code.get(t["code"])
-            cat_a = _link(where, letters_of, t["code"], "cat_a")
-            rec_c = _link(where, letters_of, t["code"], "rec")
-            chg = _link(where, letters_of, t["code"], "change")
-            p0 = _link(where, letters_of, t["code"], "sum_profit")
-            p1 = _link(where, letters_of, t["code"], "sum_profit_rec")
+            link = lambda key: _link(where, letters_of, t["code"], key)  # noqa: E731
+            cat_a, rec_c, chg, p0, p1 = link("cat_a"), link("rec"), link("change"), link("sum_profit"), link("sum_profit_rec")
             vals = [
-                ((r.variety or r.name) if r else t["name"], None, INK), (t["article"], None, BOLD), (r.abc if r else "", None, INK),
-                (f"={cat_a}" if cat_a else t["cat_a"], MONEY, INK),
-                (f"={rec_c}" if rec_c else t["rec"], MONEY, INK),
-                (f'=IFERROR({chg},"")' if chg else t["change"], PCT1S, UP_FONT if (t["change"] or 0) > 0 else DOWN_FONT),
-                (f'=IFERROR({p1}-{p0},"")' if p0 and p1 else t["profit_delta"], '+#,##0;-#,##0;0', INK),
-                (t["reason"], None, MUTED),
+                ((r.variety or r.name) if r else t["name"], None, INK, "left"),
+                (t["article"], None, INK, "left"), (r.abc if r else "", None, INK, "left"),
+                (f"={cat_a}" if cat_a else t["cat_a"], '#,##0', INK, "right"),
+                (f"={rec_c}" if rec_c else t["rec"], '#,##0', INK, "right"),
+                (f'=IFERROR({chg},"")' if chg else t["change"], '+0.0%;-0.0%;0%', INK, "right"),
+                (f'=IFERROR({p1}-{p0},"")' if p0 and p1 else t["profit_delta"], '+#,##0,;-#,##0,;0', INK, "right"),
+                (t["reason"], None, MUTED, "left"),
             ]
-            for j, (v, fmt, font) in enumerate(vals):
+            for j, (v, fmt, font, align) in enumerate(vals):
                 c = ws.cell(n, 2 + j, v)
                 c.font = font
-                c.border = ROW_BORDER
+                c.alignment = Alignment(horizontal=align)
                 if fmt:
                     c.number_format = fmt
         row = head + len(changes) + 2
 
-    # ---- проценить вручную
-    blind = sorted((r for r in rows if not r.target and (r.sales or 0) > 0), key=lambda r: -(r.sales or 0))[:15]
+    blind = sorted((r for r in rows if not r.target and (r.sales or 0) > 0), key=lambda r: -(r.sales or 0))[:10]
     if blind:
         blind_sale = sum(r.sales or 0 for r in rows if not r.target)
         all_sale = sum(r.sales or 0 for r in rows) or 1
-        _section(ws, row, "Проценить вручную",
-                 f"Без цены конкурента — {blind_sale / all_sale:.0%} продаж группы в рублях. Самые продаваемые из них: "
-                 "по ним рекомендация видит только ВР.")
-        head = row + 2
-        _header(ws, head, ["Разновидность", "Артикул", "ABC", "Продажи, руб.", "Почему нет цены"], height=22)
-        ws.merge_cells(start_row=head, start_column=6, end_row=head, end_column=13)
+        _cell(ws, f"B{row}", f"Проценить вручную — без цены конкурента {blind_sale / all_sale:.0%} продаж",
+              font=Font(name=style.FONT, size=12, bold=True, color=style.INK))
+        head = row + 1
+        _plain_header(ws, head, ["Разновидность", "Артикул", "ABC", "Продажи, тыс. ₽", "Почему нет цены"])
+        ws.cell(head, 6).alignment = Alignment(horizontal="left", vertical="bottom")
         for i, r in enumerate(blind):
             n = head + 1 + i
-            vals = [(r.variety or r.name, None, INK), (r.article, None, BOLD), (r.abc, None, INK), (r.sales, MONEY0, INK),
-                    (no_price_reason(r), None, MUTED)]
-            for j, (v, fmt, font) in enumerate(vals):
+            vals = [(r.variety or r.name, None, INK, "left"), (r.article, None, INK, "left"), (r.abc, None, INK, "left"),
+                    (r.sales, '#,##0,', INK, "right"), (no_price_reason(r), None, MUTED, "left")]
+            for j, (v, fmt, font, align) in enumerate(vals):
                 c = ws.cell(n, 2 + j, v)
                 c.font = font
-                c.border = ROW_BORDER
+                c.alignment = Alignment(horizontal=align)
                 if fmt:
                     c.number_format = fmt
-        row = head + len(blind) + 2
-
-    _section(ws, row, "Как читать")
-    notes = [
-        "Цель — цена конкурента × (1 + % позиционирования). «Откл. от цели» на листе отчёта: минус — мы дороже цели.",
-        "Снижение на p при ВР m окупается, только если продажи вырастут на p / (m − p). Повышение безопасно, "
-        "пока продажи падают не больше чем на p / (m + p).",
-        "Топ продаж — категория AA из 1С: его не снижаем, шаг вверх меньше. A — середина, B и C — хвост.",
-        "Рекомендованную цену на листе отчёта можно править — итоги пересчитаются.",
-    ]
-    for i, text in enumerate(notes):
-        _cell(ws, f"B{row + 1 + i}", f"•  {text}", font=Font(name=style.FONT, size=10, color=style.INK))
     ws.freeze_panes = "A4"
 
 
 def write_prices_overview(ws, rows, infos, opt) -> None:
     """Лист «Цены»: короткая таблица по товару, числа — ссылки на лист отчёта."""
     from .report import competitor_order
-    from .workbook import COMP_TONES, HEAD_COLORS, GREEN, RED
+    from .workbook import COMP_TONES, GREEN, RED
 
     ro = opt.recs
     tol = ro.tolerance / 100
@@ -418,6 +588,10 @@ def write_prices_overview(ws, rows, infos, opt) -> None:
     ]
     if has_qty:
         cols.append(("Продажи, шт", "calc", 9, lambda r, n, L: link(r, "sales_qty"), '#,##0', "sales_qty"))
+    if any(getattr(r, "sales3", None) is not None for r in rows):
+        qty3 = any(getattr(r, "sales3_qty", None) for r in rows)
+        cols.append(("Продажи 3 мес, шт" if qty3 else "Продажи 3 мес, руб.", "calc", 10,
+                     lambda r, n, L: link(r, "sales3"), '#,##0', "sales3"))
     cols += [
         ("ВР", "calc", 7, lambda r, n, L: link(r, "vr"), PCT1, "vr"),
         ("Кат. А", "calc", 12, lambda r, n, L: link(r, "cat_a"), MONEY, "cat_a"),
@@ -449,9 +623,9 @@ def write_prices_overview(ws, rows, infos, opt) -> None:
     head = 3
     for i, (t, kind, width, *_rest) in enumerate(cols, 1):
         c = ws.cell(head, i, t)
-        c.font = Font(name=style.FONT, bold=True, color=argb("FFFFFF"))
-        c.fill = PatternFill("solid", fgColor=HEAD_COLORS[kind])
-        c.alignment = Alignment(wrap_text=True, vertical="center", horizontal="center")
+        c.font = Font(name=style.FONT, bold=True, color=style.INK, size=10)
+        c.border = HEAD_LINE
+        c.alignment = Alignment(wrap_text=True, vertical="bottom", horizontal="left" if i <= 6 else "right")
         ws.column_dimensions[get_column_letter(i)].width = width
     ws.row_dimensions[head].height = 36
     first = head + 1
