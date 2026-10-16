@@ -160,7 +160,7 @@ def test_top_seller_is_not_cut_toward_a_later_competitor():
 
     priced = SimpleNamespace(**row.__dict__)
     priced.prices = {"BREMBO": 100, "GBRAKE": 40}
-    priced.abc = "B"
+    priced.abc = ""  # без ABC топ считается по продажам: единственный товар — топ, не категории A
     priced.cat_a = 200
     R.apply_recommendations([priced], opt)
     assert priced.target_by == "Brembo"
@@ -386,7 +386,7 @@ def test_report_layout(tmp_path, src, settings):
     opt = R.Options(**GROUP, cross_modes={"BREMBO|*": "yes"})
     result = R.build_report(src, settings, opt, tmp_path)
     wb = openpyxl.load_workbook(result.path)
-    assert wb.sheetnames[0] == "Отчет"
+    assert wb.sheetnames[:3] == ["Итоги", "Отчет", "Цены"]
     assert "Дашборд" not in wb.sheetnames
     assert "Параметры" not in wb.sheetnames
     assert {"ПСТ", "СБС", "Продажи"} <= set(wb.sheetnames)

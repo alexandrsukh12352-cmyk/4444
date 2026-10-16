@@ -179,7 +179,8 @@ async function start() {
   S.recGroups = o.rec_groups && typeof o.rec_groups === "object" ? clone(o.rec_groups) : {};
   S.recBundled = clone(S.init.bundled_rec || {});
   S.recBundledGroups = clone(S.init.bundled_groups || {});
-  S.recScope = o.rec_scope === "all" ? "all" : "group";
+  // Пороги — всегда свои у каждой группы: «одни на всех» убраны из окна.
+  S.recScope = "group";
   S.recSource = o.rec_source === "yours" ? "yours" : (o.rec_source === "mine" ? "mine" : (Object.keys(S.recGroups).length ? "mine" : "yours"));
   S.recGroupSource = o.rec_group_source && typeof o.rec_group_source === "object" ? clone(o.rec_group_source) : {};
   S.recDirty = false;
@@ -197,6 +198,9 @@ async function start() {
   renderSplit();
   renderRecForm();
   paintUi();
+  let recOpen = false;
+  try { recOpen = localStorage.getItem("recOpen") === "1"; } catch (e) { /* без памяти */ }
+  setRecOpen(recOpen);
   paintRepTabs();
   paintReportArea();
   S.ready = true;
@@ -210,7 +214,7 @@ async function start() {
 
 const CUSTOM_KEYS = ["base", "sources", "filters", "abc", "cross_modes", "cross_split", "price_source", "price_pick",
   "monitoring_only", "in_stock_only", "subgroup_mode", "suggest_threshold", "green_when"];
-const REC_NUMS = ["tolerance", "down", "min_vr", "top_share", "mid_share", "top_factor", "mid_factor", "rounding", "max_lift"];
+const REC_NUMS = ["tolerance", "down", "min_vr", "top_factor", "mid_factor", "rounding", "max_lift"];
 
 function clone(value) {
   return value == null ? value : JSON.parse(JSON.stringify(value));
@@ -348,7 +352,7 @@ function bind() {
     persist();
     analyze();
   });
-  $("#rec-save").onclick = saveMine;
+  $("#rec-toggle").onclick = () => setRecOpen(!S.recOpen);
   $("#rec-reset").onclick = resetToBundled;
   $("#rec-reset-all").onclick = resetAllBundled;
   $("#build").onclick = build;
@@ -610,13 +614,6 @@ function applyGroupRec() {
   S.opts.rec = { ...base, enabled, target };
 }
 
-function saveMine() {
-  S.recDirty = false;
-  persist(true);
-  toast("Мои пороги сохранены", "good");
-  renderRecScope();
-}
-
 function resetToBundled() {
   if (S.recScope === "all") {
     S.recMine = thresholdSnapshot(S.recBundled);
@@ -630,7 +627,7 @@ function resetToBundled() {
   renderRecForm();
   persist(true);
   analyze();
-  toast("Пороги сброшены к рекомендованным", "good");
+  toast("Правила группы — стандартные", "good");
 }
 
 function resetAllBundled() {
@@ -644,7 +641,7 @@ function resetAllBundled() {
   renderGroup();
   persist(true);
   analyze();
-  toast("Все пороги сброшены к рекомендованным", "good");
+  toast("У всех групп — стандартные правила", "good");
 }
 
 function sameNum(a, b) {
@@ -654,6 +651,7 @@ function sameNum(a, b) {
   return x === y;
 }
 
+let saveMineTimer = null;
 function rememberGroupRec() {
   if (!S.opts.rec) return;
   const snap = thresholdSnapshot(S.opts.rec);
@@ -664,32 +662,34 @@ function rememberGroupRec() {
     S.recGroups[currentKey()] = snap;
     S.recGroupSource[currentKey()] = "mine";
   }
-  S.recDirty = true;
   paintRecMarks();
   renderRecScope();
+  // Свои правила запоминаются сами — без кнопки «Сохранить».
+  clearTimeout(saveMineTimer);
+  saveMineTimer = setTimeout(() => persist(true), 700);
 }
 
 function renderRecScope() {
   const el = $("#rec-scope");
-  const who = currentSource() === "mine" ? "Мои" : "Рекомендованные";
-  const where = S.recScope === "all" ? "одни на всех" : "эта группа";
-  if (el) el.textContent = `${who}, ${where}`;
-  const dirty = $("#rec-dirty");
-  if (dirty) dirty.classList.toggle("hidden", !S.recDirty);
-  seg($("#rec-scope-mode"), S.recScope === "all" ? "all" : "group", (v) => {
-    S.recScope = v === "all" ? "all" : "group";
-    applyGroupRec();
-    renderRecForm();
-    persist();
-    analyze();
-  });
-  seg($("#rec-source"), currentSource(), (v) => {
-    setSource(v);
-    applyGroupRec();
-    renderRecForm();
-    persist();
-    analyze();
-  });
+  const own = currentSource() === "mine";
+  const r = S.opts.rec || {};
+  if (el) el.textContent = r.enabled ? (own ? "свои правила этой группы" : "стандартные правила группы") : "выключены — в отчёт не попадут";
+  const reset = $("#rec-reset");
+  if (reset) reset.classList.toggle("hidden", !own);
+}
+
+function setRecOpen(open) {
+  S.recOpen = !!open;
+  try { localStorage.setItem("recOpen", S.recOpen ? "1" : ""); } catch (e) { /* без памяти */ }
+  const panel = $("#card-recs");
+  if (panel) panel.classList.toggle("hidden", !S.recOpen);
+  const lab = $("#price-lab");
+  if (lab) lab.classList.toggle("open", S.recOpen);
+  const btn = $("#rec-toggle");
+  if (btn) {
+    btn.textContent = S.recOpen ? "Скрыть правила" : "Правила";
+    btn.classList.toggle("primary", !S.recOpen);
+  }
 }
 
 function paintRecMarks() {
@@ -780,7 +780,7 @@ function renderGroup() {
       return `<button type="button" class="group-card ${mark} ${g.brand === S.opts.brand && g.group === S.opts.group ? "on" : ""}" data-i="${i}">
         <span class="dot"></span>
         <span class="t">${esc(g.group || "без группы")}</span>
-        <span class="s">${esc(bits.join(" · "))}<span data-ownrec class="${ownRec ? "" : "hidden"}"> · мои пороги</span></span>
+        <span class="s">${esc(bits.join(" · "))}<span data-ownrec class="${ownRec ? "" : "hidden"}"> · свои правила</span></span>
       </button>`;
     }).join("")}`).join("")
     : `<div class="empty"><p>${q ? "Ничего не нашлось" : "В позиционировании нет групп из этой выгрузки"}</p></div>`;
@@ -2022,10 +2022,6 @@ const KNOBS = [
     hint: "Защита маржи: ниже — цену поднимаем, даже если рынок дешевле" },
   { key: "max_lift", title: "Снижать, только если окупится ростом продаж до", unit: "%", min: 0, max: 60, step: 1,
     hint: "Снижение на 8% при ВР 39% окупается, только если продажи вырастут на 26%. Глубже этого порога цену не режем. 0 — не проверять" },
-  { key: "top_share", title: "Топ продаж — первые", unit: "% штук", min: 10, max: 90, step: 5, pair: "top_factor",
-    hint: "У топа шаги меньше: множитель лимитов" },
-  { key: "mid_share", title: "Середина — до", unit: "% штук", min: 20, max: 100, step: 5, pair: "mid_factor",
-    hint: "У середины шаги тоже ужимаются" },
 ];
 const ROUNDING = [1, 5, 10, 50, 100];
 
@@ -2095,6 +2091,8 @@ function renderRecForm() {
   $("#rec-enabled").onchange = (e) => {
     r.enabled = e.target.checked;
     $("#rec-body").classList.toggle("off", !r.enabled);
+    renderRecScope();
+    persist();
     analyze(120);
   };
   renderRecScope();
@@ -2249,13 +2247,42 @@ function compBars(d, recOn) {
       <span class="cp-track"><em></em>${seg(now, "now")}${recOn ? seg(after, "after") : ""}${goal}</span>
       <span class="cp-num">${fmtPct(now, true)}${recOn && after != null ? ` <span class="to">→ ${fmtPct(after, true)}</span>` : ""}</span></div>`;
   }).join("");
-  return `<div class="card flat wide"><div class="dash-title">Мы против каждого конкурента <span class="muted">· средняя по выручке разница в цене</span></div>
-    <div class="cp-axis"><span>← мы дороже</span><span>вровень</span><span>мы дешевле →</span></div>${rows}
+  return `<div class="card flat${recOn ? "" : " wide"}"><div class="dash-title">Мы против каждого конкурента <span class="muted">· средняя по выручке разница в цене</span></div>
+    <div class="cp-axis"><span>← мы дороже</span><span>вровень</span><span>дешевле →</span></div>${rows}
     <div class="mix-legend"><span><i style="background:#9fb3c8"></i>сейчас</span>${recOn ? `<span><i style="background:#0f4c5c"></i>после рекомендаций</span>` : ""}<span><i class="goal-i"></i>цель по позиционированию</span></div></div>`;
 }
 
 function tile(label, value, sub, kind = "") {
   return `<div class="kpi ${kind}"><div class="l">${label}</div><div class="v">${value}</div><div class="s">${sub || ""}</div></div>`;
+}
+
+// На что обратить внимание: две-четыре строки, только то, что требует действия.
+function attention(d) {
+  const out = [];
+  const pos = (d.position && d.position.now) || [];
+  const total = pos.reduce((s, p) => s + p.sale, 0);
+  const none = (pos.find((p) => p.key === "no_price") || {}).sale || 0;
+  const priced = total - none;
+  const dear = pos.filter((p) => p.key.startsWith("d")).reduce((s, p) => s + p.sale, 0);
+  const cheap = pos.filter((p) => p.key.startsWith("c")).reduce((s, p) => s + p.sale, 0);
+  if (total && none / total >= 0.3) {
+    out.push({ kind: "warn", text: `${Math.round(none / total * 100)}% выручки — без цены конкурента. По этим товарам рекомендация видит только ВР. Самые продаваемые из них — на листе «Итоги», блок «Проценить вручную». Почему так — вкладка «Почему мало цен».` });
+  }
+  if (priced && dear / priced >= 0.3) out.push({ kind: "dn", text: `Дороже цели ${Math.round(dear / priced * 100)}% выручки с ценой конкурента. Снижать стоит адресно: топ, где разрыв большой, — и смотреть, окупится ли.` });
+  if (priced && cheap / priced >= 0.3) out.push({ kind: "up", text: `Дешевле цели ${Math.round(cheap / priced * 100)}% выручки с ценой конкурента — это запас для повышения.` });
+  const comps = (d.slices || []).filter((x) => x.kind === "comp" && x.n);
+  const weak = comps.filter((x) => d.items && x.n / d.items < 0.05);
+  if (weak.length) {
+    const names = weak.map((x) => `${String(x.title).replace(" (без учёта % позиц.)", "").replace("Против ", "")} (${fmtInt(x.n)})`).join(", ");
+    out.push({ kind: "info", text: `Слабые ориентиры: ${names} — цена меньше чем у 5% товаров.` });
+  }
+  const dn = d.rec_enabled && d.bridge && d.bridge.down;
+  if (dn && dn.items && dn.need_lift != null && dn.need_lift > 0.15) {
+    out.push({ kind: "dn", text: `Снижения (${fmtInt(dn.items)} тов.) окупятся только при росте их продаж на ${fmtPct(dn.need_lift)}.` });
+  }
+  const low = d.rec_enabled ? d.low_vr_rec : d.low_vr;
+  if (low) out.push({ kind: "info", text: `${fmtInt(low)} ${plural(low, "товар", "товара", "товаров")} с ВР ниже ${fmtInt(d.min_vr)}%${d.rec_enabled ? " и после рекомендаций" : ""}.` });
+  return out.slice(0, 4);
 }
 
 function renderDash() {
@@ -2264,34 +2291,27 @@ function renderDash() {
   if (!d) { el.innerHTML = ""; return; }
   const recOn = !!d.rec_enabled;
   const k = d.kinds || {};
-  const nowSlice = (d.slices || []).find((s) => s.kind === "all") || {};
-  const recSlice = (d.slices || []).find((s) => s.kind === "rec") || {};
   const arrow = (a, b, fmt) => `${fmt(a)} <span class="to">→ ${fmt(b)}</span>`;
   const dk = (a, b, better) => deltaKind(a, b, better);
+  const pos = (d.position && d.position.now) || [];
+  const total = pos.reduce((s, p) => s + p.sale, 0);
+  const none = (pos.find((p) => p.key === "no_price") || {}).sale || 0;
+  const share = total ? (total - none) / total : null;
+  const priceTile = tile("Выручка с ценой конкурента", share == null ? "—" : `${Math.round(share * 100)}%`,
+    `${fmtInt(d.priced)} из ${fmtInt(d.items)} товаров`, share != null && share < 0.5 ? "bad" : "");
   const tiles = recOn ? [
     tile("ВР группы", arrow(d.vr, d.vr_rec, fmtPct), d.vr != null && d.vr_rec != null ? fmtPp(d.vr_rec - d.vr) : "", dk(d.vr, d.vr_rec, "up")),
-    tile("Прибыль", d.profit_rec != null && d.profit != null ? fmtSignedRub(d.profit_rec - d.profit) : "—", `${fmtRub(d.profit)} → ${fmtRub(d.profit_rec)}`, dk(d.profit, d.profit_rec, "up")),
-    tile("Выручка", d.sale ? fmtPct(d.sale_rec / d.sale - 1, true) : "—", `${fmtRub(d.sale)} → ${fmtRub(d.sale_rec)}`, ""),
-    tile(`В коридоре ±${esc(d.tolerance)}%`, d.with_target ? arrow(d.in_band, d.in_band_rec, fmtInt) : "—", d.with_target ? `из ${fmtInt(d.with_target)} с целью` : "нет цен конкурентов", dk(d.in_band, d.in_band_rec, "up")),
-    tile("Что делаем", `<span class="up-t">↑${fmtInt((k.up || 0) + (k.vr || 0))}</span> <span class="dn-t">↓${fmtInt(k.down || 0)}</span>`, `не трогаем ${fmtInt(k.keep || 0)}${k.vr ? ` · до мин. ВР ${fmtInt(k.vr)}` : ""}`),
-    tile(`Ниже ${fmtInt(d.min_vr)}% ВР`, arrow(d.low_vr, d.low_vr_rec, fmtInt), "товаров", dk(d.low_vr, d.low_vr_rec, "down")),
+    tile("Прибыль", d.profit_rec != null && d.profit != null ? fmtSignedRub(d.profit_rec - d.profit) : "—", "при тех же продажах", dk(d.profit, d.profit_rec, "up")),
+    priceTile,
+    tile("Двигаем цены", `<span class="up-t">↑${fmtInt((k.up || 0) + (k.vr || 0))}</span> <span class="dn-t">↓${fmtInt(k.down || 0)}</span>`, `не трогаем ${fmtInt(k.keep || 0)}`),
   ] : [
-    tile("Товаров / с ценой", fmtInt(d.items), `${fmtInt(d.priced)} с ценой конкурента · ${pct(d.priced, d.items)}%`),
     tile("ВР группы", fmtPct(d.vr), `ниже ${fmtInt(d.min_vr)}% — ${fmtInt(d.low_vr)} шт.`),
+    tile("Товаров", fmtInt(d.items), `${fmtInt(d.priced)} с ценой конкурента`),
+    priceTile,
     tile(`В коридоре ±${esc(d.tolerance)}%`, fmtInt(d.in_band), `из ${fmtInt(d.with_target)} с целью`),
-    tile("Среднее отклонение", fmtPct(nowSlice.mean, true), `медиана ${fmtPct(nowSlice.median, true)}`),
   ];
-  const labels = d.buckets.map((b) => b.label);
-  const devChart = groupedBars(labels, d.buckets.map((b) => b.now), recOn ? d.buckets.map((b) => b.rec || 0) : null, {
-    colorA: (i) => {
-      const t = tone(labels[i]);
-      return t === "mid" ? "#98a2b3" : t === "good" ? "#16a34a" : "#dc2626";
-    },
-  });
-  const ch = d.change_hist;
-  const changeChart = recOn && ch ? groupedBars(ch.labels, ch.items, null, {
-    colorA: (i) => (i < 4 ? "#1d4ed8" : i === 4 ? "#98a2b3" : "#b42318"),
-  }) : "";
+  const notes = attention(d);
+  const icon = { warn: "!", dn: "↓", up: "↑", info: "i" };
   const limitColors = { free: "#0f4c5c", capped: "#d97706", band: "#98a2b3", vr: "#7c3aed", top: "#0891b2", payback: "#b3541e", no_price: "#cbd5e1" };
   const limitRows = (d.limits || []).filter((x) => x.key !== "no_price");
   const limits = recOn && limitRows.length ? hbars(limitRows.map((x) => ({ label: x.title, value: x.items, color: limitColors[x.key] })), limitRows.reduce((n, x) => n + x.items, 0)) : "";
@@ -2305,14 +2325,6 @@ function renderDash() {
       <td class="num">${fmtPct(x.mean_gap, true)}</td>
       ${recOn ? `<td class="num after">${fmtPct(x.mean_gap_rec, true)}</td>` : ""}
     </tr>`).join("");
-  const comps = (d.slices || []).filter((s) => s.kind === "comp" && s.n);
-  const compRows = comps.map((s) => `<tr>
-      <td>${esc(String(s.title).replace(" (без учёта % позиц.)", "").replace("Против ", ""))}</td>
-      <td class="num">${fmtInt(s.n)}</td>
-      <td class="num">${fmtPct(s.mean, true)}</td>
-      ${recOn ? `<td class="num after">${fmtPct(s.mean_rec, true)}</td>` : ""}
-      <td class="num">${fmtPct(s.median, true)}</td>
-    </tr>`).join("");
   const movers = (d.top_changes || []).slice(0, 10);
   const moverRows = movers.map((x) => `<tr>
       <td class="nowrap"><b>${esc(x.article)}</b></td>
@@ -2325,18 +2337,18 @@ function renderDash() {
     </tr>`).join("");
   el.innerHTML = `
     <div class="kpis live">${tiles.join("")}</div>
-    ${(d.conclusions || []).length ? `<div class="card flat"><div class="dash-title">Выводы</div><ul class="conclusions">${d.conclusions.map((t) => `<li>${esc(t)}</li>`).join("")}</ul></div>` : ""}
-    ${recOn ? "" : `<div class="note info">Включите переключатель «Рекомендованные цены» слева — справа появится «сейчас → после», и каждый ползунок будет пересчитывать цифры сразу.</div>`}
+    ${notes.length ? `<div class="attn">${notes.map((n) => `<div class="attn-row k-${n.kind}"><i>${icon[n.kind]}</i><span>${esc(n.text)}</span></div>`).join("")}</div>` : ""}
     <div class="live-grid">
       ${positionMix(d)}
       ${recOn ? bridgeBlock(d) : ""}
-      ${limits ? `<div class="card flat"><div class="dash-title">Что решило рекомендацию <span class="muted">· товары с ценой конкурента</span></div>${limits}
-        <div class="muted small-text">«Упёрлись в лимит» — до цели не дошли из-за шага. «Окупаемость» — снижение глубже не окупится ростом продаж.</div></div>` : ""}
       ${compBars(d, recOn)}
     </div>
-    ${recOn && movers.length ? `<div class="card flat"><div class="dash-title">Что сильнее меняет прибыль</div>
-      <div class="table-wrap scroll"><table class="mini"><thead><tr><th>Артикул</th><th>Наименование</th><th class="num">Кат. А</th><th class="num">Рек.</th><th class="num">Изм.</th><th class="num">Δ прибыли</th><th>Почему</th></tr></thead><tbody>${moverRows}</tbody></table></div></div>` : ""}
-    <details class="card flat"><summary class="dash-title">По ABC, подгруппам и сегментам</summary>
+    <details class="card flat more"><summary class="dash-title">Подробнее: выводы, что решило рекомендацию, крупные изменения, ABC и подгруппы</summary>
+      ${(d.conclusions || []).length ? `<div class="dash-block"><div class="dash-title">Выводы</div><ul class="conclusions">${d.conclusions.map((t) => `<li>${esc(t)}</li>`).join("")}</ul></div>` : ""}
+      ${limits ? `<div class="dash-block"><div class="dash-title">Что решило рекомендацию <span class="muted">· товары с ценой конкурента</span></div>${limits}
+        <div class="muted small-text">«Упёрлись в лимит» — до цели не дошли из-за шага. «Окупаемость» — снижение глубже не окупится ростом продаж.</div></div>` : ""}
+      ${recOn && movers.length ? `<div class="dash-block"><div class="dash-title">Что сильнее меняет прибыль</div>
+        <div class="table-wrap scroll"><table class="mini"><thead><tr><th>Артикул</th><th>Наименование</th><th class="num">Кат. А</th><th class="num">Рек.</th><th class="num">Изм.</th><th class="num">Δ прибыли</th><th>Почему</th></tr></thead><tbody>${moverRows}</tbody></table></div></div>` : ""}
       ${cutTable("ВР по ABC", d.abc || [], groupHead("ABC"), groupBody(d.abc || []))}
       ${cutTable("По подгруппам", (d.subgroups || []).length > 1 ? d.subgroups : [], groupHead("Подгруппа"), groupBody(d.subgroups || []))}
       ${cutTable("По сегментам автопарка", d.segments || [], groupHead("Сегмент"), groupBody(d.segments || []))}

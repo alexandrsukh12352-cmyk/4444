@@ -632,7 +632,7 @@ def _missing_phrase(parts: list[str]) -> str:
     return "нет " + ", ".join(parts[:-1]) + " и " + parts[-1]
 
 
-REC_FIELDS = ("tolerance", "down", "min_vr", "top_share", "mid_share", "top_factor", "mid_factor", "rounding", "max_lift")
+REC_FIELDS = ("tolerance", "down", "min_vr", "top_factor", "mid_factor", "rounding", "max_lift")
 
 
 def rec_group_key(brand: str, group: str) -> str:
@@ -1035,7 +1035,7 @@ def api_init(_body: dict) -> dict:
 def dataclasses_rec(rec: RecOptions) -> dict:
     return {
         "enabled": rec.enabled, "target": rec.target, "tolerance": rec.tolerance, "down": rec.down,
-        "up": rec.up, "min_vr": rec.min_vr, "top_share": rec.top_share, "mid_share": rec.mid_share,
+        "up": rec.up, "min_vr": rec.min_vr, "max_lift": rec.max_lift,
         "top_factor": rec.top_factor, "mid_factor": rec.mid_factor, "rounding": rec.rounding,
         "priced_first": rec.priced_first,
     }

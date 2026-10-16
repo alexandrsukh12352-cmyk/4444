@@ -34,8 +34,6 @@ class RecOptions:
     down: float = 10.0  # не понижать больше, %
     up: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_UP))  # не повышать больше, % — по сегменту
     min_vr: float = 32.0
-    top_share: float = 50.0  # топ — артикулы, дающие первые N % продаж в шт
-    mid_share: float = 80.0
     top_factor: float = 0.5  # во сколько раз ужимаются лимиты для топа
     mid_factor: float = 0.75
     rounding: float = 1.0  # шаг округления Кат. А, руб.
@@ -46,7 +44,7 @@ class RecOptions:
     def from_dict(cls, data: dict | None) -> "RecOptions":
         data = dict(data or {})
         known = {k: v for k, v in data.items() if k in cls.__dataclass_fields__}
-        for key in ("tolerance", "down", "min_vr", "top_share", "mid_share", "top_factor", "mid_factor", "rounding", "max_lift"):
+        for key in ("tolerance", "down", "min_vr", "top_factor", "mid_factor", "rounding", "max_lift"):
             if known.get(key) not in (None, ""):
                 known[key] = float(known[key])
         if "enabled" in known:
@@ -68,7 +66,6 @@ def bundled_rec() -> dict:
     base = RecOptions()
     return {
         "tolerance": base.tolerance, "down": base.down, "min_vr": base.min_vr,
-        "top_share": base.top_share, "mid_share": base.mid_share,
         "top_factor": base.top_factor, "mid_factor": base.mid_factor,
         "rounding": base.rounding, "max_lift": base.max_lift, "up": dict(base.up),
     }
@@ -161,8 +158,23 @@ def sales_weight(rows) -> "callable":
     return lambda r: r.sales or 0
 
 
-def weight_classes(rows, opt: RecOptions) -> dict[str, str]:
-    """Код -> top / mid / tail по накопленной доле продаж в шт (или в рублях, если штук нет)."""
+# Без ABC в выгрузке: топ — первые 65% продаж, середина — до 80%. Так же делит 1С: AA ≈ 65%, A ≈ 17%.
+TOP_SHARE = 65.0
+MID_SHARE = 80.0
+
+
+def abc_class(abc: str) -> str:
+    """AA — топ, A — середина, остальное (B, C, D, пусто) — хвост."""
+    key = abc_key(abc)
+    return {"AA": "top", "A": "mid"}.get(key, "tail")
+
+
+def weight_classes(rows, opt: RecOptions | None = None) -> dict[str, str]:
+    """Код -> top / mid / tail. Сначала ABC из 1С; если ABC нет ни у одного товара —
+    по накопленной доле продаж в шт (или в рублях, если штук нет)."""
+    del opt
+    if any(abc_key(getattr(r, "abc", "")) in {"AA", "A", "B", "C"} for r in rows):
+        return {r.code: abc_class(getattr(r, "abc", "")) for r in rows}
     w = sales_weight(rows)
     sold = sorted(((w(r), r.code) for r in rows if w(r) > 0), reverse=True)
     total = sum(q for q, _ in sold)
@@ -171,9 +183,9 @@ def weight_classes(rows, opt: RecOptions) -> dict[str, str]:
     for qty, code in sold:
         share_before = acc / total * 100 if total else 100
         acc += qty
-        if share_before < opt.top_share:
+        if share_before < TOP_SHARE:
             result[code] = "top"
-        elif share_before < opt.mid_share:
+        elif share_before < MID_SHARE:
             result[code] = "mid"
     return result
 
@@ -200,6 +212,12 @@ def target_for(prices: dict[str, float | None], percents: dict[str, float], orde
         k, t = min(targets, key=lambda x: x[1])
         return t, k
     return targets[0][1], targets[0][0]
+
+
+def _num(value: float, digits: int | None = None) -> str:
+    """Число по-русски: 0,5 и 7,5 — с запятой."""
+    text = f"{value:.{digits}f}" if digits is not None else f"{value:g}"
+    return text.replace(".", ",")
 
 
 def _round(value: float, step: float) -> float:
@@ -240,13 +258,11 @@ def recommend(cur: float | None, sbs: float | None, target: float | None, segmen
     notes = []
     if weight == "top":
         if is_core_abc(abc):
-            notes.append("топ продаж, категория A — цену не снижаем")
+            notes.append(f"топ продаж ({abc_key(abc)}) — не снижаем" + (f", шаг вверх ×{_num(opt.top_factor)}" if factor != 1 else ""))
         else:
-            notes.append("топ продаж — вниз не больше 2%")
-        if factor != 1:
-            notes.append(f"вверх ×{opt.top_factor:g}")
+            notes.append("топ продаж — вниз не больше 2%" + (f", вверх ×{_num(opt.top_factor)}" if factor != 1 else ""))
     elif weight == "mid" and factor != 1:
-        notes.append(f"середина продаж — лимиты ×{opt.mid_factor:g}")
+        notes.append(f"середина продаж — шаг ×{_num(opt.mid_factor)}")
 
     if target:
         gap = 1 - cur / target  # как «Откл» в отчёте: > 0 — мы дешевле цели
@@ -282,7 +298,7 @@ def recommend(cur: float | None, sbs: float | None, target: float | None, segmen
                     if payback:
                         reason += f"; {payback}"
                     elif limited != change:
-                        reason += f", ограничено {'+' if limited > 0 else '−'}{abs(limited) * 100:.1f}%"
+                        reason += f", ограничено {'+' if limited > 0 else '−'}{_num(abs(limited) * 100, 1)}%"
                         if limited > 0:
                             reason += f" ({segment.lower()} сегмент)"
     else:
@@ -301,7 +317,7 @@ def recommend(cur: float | None, sbs: float | None, target: float | None, segmen
                 reason = f"ВР ниже {opt.min_vr:g}% — поднимаем" + (", упёрлись в лимит" if raised < floor else "")
     price = _round(price, opt.rounding)
     if abs(price - cur) < max(opt.rounding, 0.01) / 2:
-        price = round(cur, 2)
+        price = cur  # та же цена до копейки: «Изм. %» ровно ноль
         if kind in ("up", "down", "vr"):
             kind = "keep"
     if notes and kind != "keep":

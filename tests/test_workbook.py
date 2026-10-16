@@ -184,9 +184,15 @@ def test_recommend_respects_limits_and_margin():
 
 
 def test_weight_classes_by_accumulated_sales():
-    rows = [type("R", (), {"code": c, "sales_qty": q}) for c, q in (("a", 60), ("b", 30), ("c", 10), ("d", 0))]
-    got = weight_classes(rows, RecOptions(top_share=50, mid_share=80))
+    rows = [type("R", (), {"code": c, "sales_qty": q, "abc": ""}) for c, q in (("a", 70), ("b", 16), ("c", 14), ("d", 0))]
+    got = weight_classes(rows, RecOptions())
     assert got == {"a": "top", "b": "mid", "c": "tail", "d": "tail"}
+
+
+def test_weight_classes_follow_abc_from_1c():
+    rows = [type("R", (), {"code": c, "sales_qty": q, "abc": abc})
+            for c, q, abc in (("a", 1, "AA"), ("b", 90, "А"), ("c", 5, "B"), ("d", 4, "C"), ("e", 0, ""))]
+    assert weight_classes(rows) == {"a": "top", "b": "mid", "c": "tail", "d": "tail", "e": "tail"}
 
 
 # ---------------------------------------------------------------- книга
@@ -210,7 +216,7 @@ def _block(ws, title):
 def test_full_report_formulas_match_python(tmp_path, src, settings):
     opt, prep, result, wb = _build(tmp_path, src, settings, rec={"enabled": True, "target": "main"})
     assert result.kind == "full"
-    assert wb.sheetnames[0] == "Отчет" and "Дашборд" not in wb.sheetnames and "Параметры" not in wb.sheetnames
+    assert wb.sheetnames[:3] == ["Итоги", "Отчет", "Цены"] and "Дашборд" not in wb.sheetnames and "Параметры" not in wb.sheetnames
     assert {"ПСТ", "СБС", "Продажи"} <= set(wb.sheetnames)
     assert wb["ПСТ"].sheet_state == "hidden" and wb["Отчет"].sheet_state == "visible"
     assert any(c.value == "Код товара" for row in wb["ПСТ"].iter_rows(max_row=4) for c in row)
@@ -244,7 +250,7 @@ def test_full_report_formulas_match_python(tmp_path, src, settings):
     assert val("Brembo цена") == pytest.approx(row.prices["BREMBO"])
     assert "INDEX" in str(ws.cell(n, head["МО"]).value)
     assert "ПСТ" in str(ws.cell(n, head["МО"]).value)
-    assert "Цель по позиц." not in head and "По кому" not in head and "Откл от цели" not in head
+    assert {"Цель", "По кому цель", "Откл. от цели", "Почему"} <= set(head)
     assert "В пути, шт" not in head and "Потенциал, шт" not in head
     assert val("Рек. кат. А") == pytest.approx(row.rec.price)
     assert val("Изм. %") == pytest.approx(row.rec.change)
@@ -252,7 +258,7 @@ def test_full_report_formulas_match_python(tmp_path, src, settings):
     assert "Основание" not in head and "Brembo" not in head
     assert wb["Отчет"].cell(3, 1).fill.fill_type == "solid"
     for other in wb.worksheets:
-        if other.title in ("Отчет", "Списки"):
+        if other.title in ("Отчет", "Списки", "Итоги", "Цены"):
             continue
         assert other.tables == {}
         assert list(other.conditional_formatting) == []
@@ -296,9 +302,35 @@ def test_competitor_price_is_a_number(tmp_path, src, settings):
     assert "Кроссы" not in str(ws.cell(n, head["Brembo цена"]).value)
 
 
+def test_summary_and_prices_sheets_link_to_the_report(tmp_path, src, settings):
+    opt, prep, result, wb = _build(tmp_path, src, settings, rec={"enabled": True, "target": "main"})
+    assert wb.active.title == "Итоги"
+    itogi = wb["Итоги"]
+    assert itogi.sheet_state == "visible" and wb["Цены"].sheet_state == "visible"
+    texts = [c.value for row in itogi.iter_rows() for c in row if isinstance(c.value, str)]
+    assert any(t.startswith("=") and "'Отчет'!" in t for t in texts)
+    assert "По подгруппам" in texts and "Итого" in texts
+    assert not any("#REF" in t for t in texts)
+
+    report = wb["Отчет"]
+    head = _header(report)
+    assert {"Цель", "По кому цель", "Откл. от цели", "Почему"} <= set(head)
+    row = next(r for r in prep.kept if r.target)
+    n = _row(report, int(row.code) if row.code.isdigit() else row.code)
+    assert report.cell(n, head["Цель"]).value == pytest.approx(round(row.target, 2))
+    assert report.cell(n, head["Почему"]).value == row.rec.reason
+
+    prices = wb["Цены"]
+    phead = {c.value: c.column for c in prices[3] if c.value}
+    assert list(phead)[:6] == ["Артикул", "Наименование", "Группа", "Подгруппа", "Разновидность", "ABC"]
+    assert "Кат. А" in phead and "Brembo цена" in phead and "Откл Brembo" in phead
+    m = next(c.row for c in prices["A"] if c.value == row.article)
+    assert "'Отчет'!" in prices.cell(m, phead["Кат. А"]).value
+
+
 def test_cross_sheet_lists_selected_articles_and_supplier_prices(tmp_path, src, settings):
     _, prep, _, wb = _build(tmp_path, src, settings)
-    assert wb.sheetnames[1] == "Кроссы"
+    assert wb.sheetnames[3] == "Кроссы"
     cross = wb["Кроссы"]
     assert cross.sheet_state == "hidden"
     assert list(cross.merged_cells.ranges) == []

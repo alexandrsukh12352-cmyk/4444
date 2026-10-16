@@ -758,6 +758,15 @@ def report_columns(rows: list[Row], refs: Refs, opt: Options, period: str,
         from .sisters import sister_title
         cols.append(Column(sister_title(sister), "sister", 16, lambda r, *_: r.sister_price, MONEY, key="sister"))
 
+    if any(r.target for r in rows):
+        # Цель — снимок на момент формирования: цена конкурента × (1 + % позиционирования).
+        cols += [
+            Column("Цель", "pos", 12, lambda r, *_: round(r.target, 2) if r.target else None, MONEY, key="target", edge=True),
+            Column("По кому цель", "pos", 12, lambda r, *_: r.target_by if r.target else "", key="target_by"),
+            Column("Откл. от цели", "pos", 9, lambda r, n, L: f'=IF({both(L["target"] + str(n), L["cat_a"] + str(n))},'
+                   f'1-{L["cat_a"]}{n}/{L["target"]}{n},"")', PCT, key="gap", rule="band"),
+        ]
+
     if ro.enabled:
         def rec_value(r, *_):
             return r.rec.price if r.rec else None
@@ -766,6 +775,7 @@ def report_columns(rows: list[Row], refs: Refs, opt: Options, period: str,
             Column("Рек. кат. А", "rec", 12, rec_value, MONEY, key="rec", input=is_input),
             Column("Изм. %", "rec", 8, lambda r, n, L: f'=IF({both(L["rec"] + str(n), L["cat_a"] + str(n))},'
                    f'{L["rec"]}{n}/{L["cat_a"]}{n}-1,"")', PCT_SIGNED, key="change", rule="change"),
+            Column("Почему", "rec", 46, lambda r, *_: r.rec.reason if r.rec else "", key="reason"),
         ]
         extra = []
         extra.append(Column("Рек. МО", "rec", 12, lambda r, n, L: f'=IF(ISNUMBER({L["rec"]}{n}),{L["rec"]}{n}/(1-{excel_num(r.discount)}/100),"")'
@@ -1314,12 +1324,21 @@ def build_report(src: Sources, settings: Settings, opt: Options, out_dir: Path,
     crosses = wb.create_sheet(sheet_title("Кроссы", used))
     write_cross_prices(crosses, sheet_rows)
 
-    order = [wb[i.title] for i in infos] + [crosses] + export_sheets
+    from .dashboard import summary as dash_summary
+    from .itogi import write_prices_overview, write_summary_sheet
+
+    itogi = wb.create_sheet(sheet_title("Итоги", used))
+    write_summary_sheet(itogi, kept, infos, opt, src, title, dash_summary(kept, opt))
+    prices_ws = wb.create_sheet(sheet_title("Цены", used))
+    write_prices_overview(prices_ws, sheet_rows, infos, opt)
+
+    order = [itogi] + [wb[i.title] for i in infos] + [prices_ws, crosses] + export_sheets
     wb._sheets = order  # noqa: SLF001
-    report_titles = {i.title for i in infos}
+    report_titles = {i.title for i in infos} | {itogi.title, prices_ws.title}
     for ws in wb.worksheets:
         if ws.title in report_titles:
-            ws.sheet_properties.tabColor = argb("0F4C5C")
+            if ws.sheet_properties.tabColor is None:
+                ws.sheet_properties.tabColor = argb("0F4C5C")
             ws.sheet_state = "visible"
         else:
             ws.sheet_state = "hidden"
@@ -1474,7 +1493,7 @@ def write_params_sheet(ws, src: Sources, settings: Settings, opt: Options, kept:
             ["  не понижать больше", f"{ro.down:g}%"],
             ["  не повышать больше", ", ".join(f"{k.lower()} {v:g}%" for k, v in ro.up.items())],
             ["  минимальная ВР", f"{ro.min_vr:g}%"],
-            ["  топ продаж", f"первые {ro.top_share:g}% продаж в шт — лимиты ×{ro.top_factor:g}; до {ro.mid_share:g}% — ×{ro.mid_factor:g}"],
+            ["  топ продаж", f"ABC из 1С: AA — топ, лимиты ×{ro.top_factor:g}, вниз не снижаем; A — середина, ×{ro.mid_factor:g}. Без ABC — первые 65% и 80% продаж"],
             ["  округление Кат. А", f"{ro.rounding:g} руб." if ro.rounding else "нет"],
         ]
     params += [[f"Источник: {title}", SOURCE_CHOICES[opt.source(k)]] for k, (title, *_) in FIELDS.items()]
