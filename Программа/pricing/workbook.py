@@ -854,9 +854,12 @@ def report_columns(rows: list[Row], refs: Refs, opt: Options, period: str,
             Column("Новая цена, ₽", "rec", 11, rec_value, RUB, key="rec", input=is_input),
             Column("Изм.", "rec", 7, lambda r, n, L: f'=IF({both(L["rec"] + str(n), L["cat_a"] + str(n))},'
                    f'{L["rec"]}{n}/{L["cat_a"]}{n}-1,"")', CHANGE, key="change", rule="change"),
-            Column("Причина", "rec", 30, lambda r, *_: short_reason(r.rec.reason) if r.rec else "", key="reason"),
         ]
-        extra = [Column("Подробно", "rec", 60, lambda r, *_: r.rec.reason if r.rec else "", key="reason_full")]
+        if opt.reason_cols in ("all", "short"):
+            decide.append(Column("Причина", "rec", 30, lambda r, *_: short_reason(r.rec.reason) if r.rec else "", key="reason"))
+        extra = []
+        if opt.reason_cols == "all":
+            extra.append(Column("Подробно", "rec", 60, lambda r, *_: r.rec.reason if r.rec else "", key="reason_full"))
         if any(getattr(r, "last_change", None) for r in rows):
             from .pricehistory import change_text
 
@@ -1449,12 +1452,21 @@ def build_report(src: Sources, settings: Settings, opt: Options, out_dir: Path,
     itogi = wb.create_sheet(sheet_title("Сводка", used))
     chart_ws = wb.create_sheet(sheet_title("Графики", used))
     write_summary_sheet(itogi, kept, infos, opt, src, title, dash_summary(kept, opt), chart_ws, getattr(prep, "signals", None))
-    prices_ws = wb.create_sheet(sheet_title("Цены конкурентов", used))
-    write_prices_overview(prices_ws, sheet_rows, infos, opt)
+    price_sheets = []
+    if opt.subgroup_mode == "sheets" and len(subgroups) > 1:
+        # отчёт разложен по подгруппам — и цены конкурентов тоже: лист «Цены …» на подгруппу
+        for sg in subgroups:
+            ws_p = wb.create_sheet(sheet_title(f"Цены {sg or 'без подгруппы'}", used))
+            write_prices_overview(ws_p, [r for r in sheet_rows if r.subgroup == sg], infos, opt)
+            price_sheets.append(ws_p)
+    else:
+        ws_p = wb.create_sheet(sheet_title("Цены конкурентов", used))
+        write_prices_overview(ws_p, sheet_rows, infos, opt)
+        price_sheets.append(ws_p)
 
-    order = [itogi] + [wb[i.title] for i in infos] + [prices_ws, crosses, chart_ws] + export_sheets
+    order = [itogi] + [wb[i.title] for i in infos] + price_sheets + [crosses, chart_ws] + export_sheets
     wb._sheets = order  # noqa: SLF001
-    report_titles = {i.title for i in infos} | {itogi.title, prices_ws.title}
+    report_titles = {i.title for i in infos} | {itogi.title} | {w.title for w in price_sheets}
     for ws in wb.worksheets:
         if ws.title in report_titles:
             ws.sheet_properties.tabColor = None  # ярлыки без цвета, как у обычной книги

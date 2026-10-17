@@ -1482,7 +1482,7 @@ def api_build(body: dict) -> dict:
         price_source=opt.price_source, monitoring_only=opt.monitoring_only, in_stock_only=opt.in_stock_only,
         brand=opt.brand, group=opt.group, report_kind=opt.report_kind,
         sheet_filters=report.sheet_filter_keys(opt),
-        green_when=opt.green_when, ui=incoming.get("ui") or settings.options.get("ui") or "template",
+        green_when=opt.green_when, reason_cols=opt.reason_cols, ui=incoming.get("ui") or settings.options.get("ui") or "template",
     )
     _remember_rec(settings, incoming)
     settings.save()

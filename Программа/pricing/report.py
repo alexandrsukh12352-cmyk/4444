@@ -67,6 +67,7 @@ CROSS_SPLITS = {
 PRICE_SOURCES = {"acp": "АЦПКД", "prices": "Прайсы", "both": "АЦПКД и прайсы"}
 PRICE_PICKS = {"median": "Медиана поставщиков", "second": "Вторая снизу", "min": "Самая низкая"}
 REPORT_KINDS = {"full": "Полный"}  # быстрого отчёта больше нет
+REASON_COLS = {"all": "Причина и подробно", "short": "Только причина", "none": "Без причин"}
 SUBGROUP_MODES = {"sheets": "Лист на подгруппу", "single": "Все на одном листе"}
 
 FILTERS = {
@@ -193,6 +194,7 @@ class Options:
     money_base: str = "sales"  # sales — сумма с продаж; potential — с потенциала (остаток + в пути)
     stock_slice: str = ""  # sale / overstock — отдельный отчёт только по этой выборке
     sheet_filters: list | None = None  # None — три фильтра по умолчанию; список — что вывести над таблицей
+    reason_cols: str = "all"  # all — «Причина» и «Подробно»; short — только «Причина»; none — без них
 
     @classmethod
     def from_dict(cls, data: dict) -> "Options":
@@ -214,6 +216,8 @@ class Options:
             opt.green_when = "above"
         if opt.money_base not in ("sales", "potential"):
             opt.money_base = "sales"
+        if opt.reason_cols not in REASON_COLS:
+            opt.reason_cols = "all"
         if opt.stock_slice not in ("sale", "overstock"):
             opt.stock_slice = ""
         opt.filters = _fold_clearance(opt.filters)

@@ -169,6 +169,7 @@ async function start() {
     report_kind: "full",
     sheet_filters: Array.isArray(o.sheet_filters) ? o.sheet_filters.slice() : (S.init.default_sheet_filters || ["overstock", "sale", "competitor_price"]).slice(),
     green_when: o.green_when === "below" ? "below" : "above",
+    reason_cols: ["all", "short", "none"].includes(o.reason_cols) ? o.reason_cols : "all",
     money_base: o.money_base === "potential" ? "potential" : "sales",
     rec: { ...(S.init.rec || {}), ...(o.rec || {}), up: { ...(S.init.default_up || {}), ...((o.rec || {}).up || {}) } },
     ui: "custom",
@@ -218,7 +219,7 @@ async function start() {
 }
 
 const CUSTOM_KEYS = ["base", "sources", "filters", "abc", "cross_modes", "cross_split", "price_source", "price_pick",
-  "monitoring_only", "in_stock_only", "subgroup_mode", "suggest_threshold", "green_when", "defaults_rev"];
+  "monitoring_only", "in_stock_only", "subgroup_mode", "suggest_threshold", "green_when", "reason_cols", "defaults_rev"];
 // 2 — цена конкурента по медиане поставщиков и только в наличии (аудит 16 окт).
 const DEFAULTS_REV = 2;
 const REC_NUMS = ["tolerance", "down", "min_vr", "top_factor", "mid_factor", "rounding", "max_lift", "cooldown"];
@@ -2120,6 +2121,7 @@ function renderRecForm() {
   const note = targetButtons.find(([k]) => k === group);
   $("#rec-target-note").textContent = note ? note[2] : "";
   seg($("#green-when"), S.opts.green_when, (v) => { S.opts.green_when = v; persist(); if (S.analysis) renderDash(); });
+  seg($("#reason-cols"), S.opts.reason_cols || "all", (v) => { S.opts.reason_cols = v; persist(); });
   seg($("#money-base"), S.opts.money_base === "potential" ? "potential" : "sales", (v) => {
     S.opts.money_base = v === "potential" ? "potential" : "sales";
     persist();

@@ -287,7 +287,7 @@ def test_subgroup_sheets_and_modes(tmp_path, src, settings):
                 assert "Товары" in names
                 assert "Параметры" not in names
                 assert "ПСТ" in names and "СБС" in names and "Продажи" in names
-                assert "Цены конкурентов" in names and "Справочники" not in names and "Данные" not in names
+                assert (any(n.startswith("Цены ") for n in names) if mode == "sheets" else "Цены конкурентов" in names) and "Справочники" not in names and "Данные" not in names
                 if enabled:
                     wb = openpyxl.load_workbook(result.path)
                     assert "Новая цена, ₽" in [c.value for c in wb["Товары"][4]]
@@ -476,3 +476,21 @@ def test_short_reasons_for_the_report():
     assert short_reason("нет продаж — цену не поднимаем") == "нет продаж"
     assert short_reason("цену меняли 15.09.2026: +5,0%, по рекомендации — не трогаем до 14.12.2026, ждём") == "меняли 15.09, ждём до 14.12"
     assert short_reason("к цели Brembo; не ниже ВР 30%") == "к Brembo, мин. ВР"
+
+
+def test_reason_columns_can_be_left_out_and_prices_split_by_subgroup(tmp_path, src, settings, monkeypatch):
+    monkeypatch.setattr(R, "_subgroup_in_positioning", lambda *a, **k: True)
+    half = len(src.pst) // 2
+    pst = [dataclasses.replace(p, subgroup="Спортивные тормозные диски") if i < half else p for i, p in enumerate(src.pst)]
+    split = dataclasses.replace(src, pst=pst)
+    for cols, expect in (("all", {"Причина", "Подробно"}), ("short", {"Причина"}), ("none", set())):
+        opt = R.Options(**GROUP, subgroup_mode="single", reason_cols=cols, rec={"enabled": True})
+        wb = openpyxl.load_workbook(R.build_report(split, settings, opt, tmp_path / cols).path)
+        head = set(_header(wb["Товары"]))
+        assert {"Причина", "Подробно"} & head == expect, cols
+        assert "Новая цена, ₽" in head
+    opt = R.Options(**GROUP, subgroup_mode="sheets", rec={"enabled": True})
+    names = openpyxl.load_workbook(R.build_report(split, settings, opt, tmp_path / "split").path).sheetnames
+    prices = [n for n in names if n.startswith("Цены ")]
+    assert len(prices) == 2 and "Цены конкурентов" not in names, names
+    assert R.Options.from_dict({"reason_cols": "что-то"}).reason_cols == "all"
