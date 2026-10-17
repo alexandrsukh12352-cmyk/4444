@@ -103,6 +103,7 @@ class Pick:
     article: str
     yes: bool | None  # None — кросс взят из АЦПКД
     offers: list[PriceOffer]
+    via: str = ""  # кросс взят у нашего двойника по ОЕМ: его артикул
 
 
 @dataclass
@@ -155,6 +156,7 @@ class Row:
     sister_article: str = ""
     sister_price: float | None = None
     excluded: dict = field(default_factory=dict)  # конкурент -> почему его цена не взята в сравнение
+    oem: dict = field(default_factory=dict)  # конкурент -> цена-кандидат по ОЕМ: price, article, twin, via, used
 
     @property
     def any_price(self) -> bool:
@@ -195,6 +197,7 @@ class Options:
     stock_slice: str = ""  # sale / overstock — отдельный отчёт только по этой выборке
     sheet_filters: list | None = None  # None — три фильтра по умолчанию; список — что вывести над таблицей
     reason_cols: str = "all"  # all — «Причина» и «Подробно»; short — только «Причина»; none — без них
+    oem_cross: str = "show"  # кроссы через ОЕМ: off — не искать, show — показывать, use — брать в цену
 
     @classmethod
     def from_dict(cls, data: dict) -> "Options":
@@ -216,6 +219,8 @@ class Options:
             opt.green_when = "above"
         if opt.money_base not in ("sales", "potential"):
             opt.money_base = "sales"
+        if opt.oem_cross not in ("off", "show", "use"):
+            opt.oem_cross = "show"
         if opt.reason_cols not in REASON_COLS:
             opt.reason_cols = "all"
         if opt.stock_slice not in ("sale", "overstock"):
@@ -1186,9 +1191,40 @@ def pick_offer(offers: list, how: str = "min"):
     return ranked[(len(ranked) - 1) // 2]
 
 
+def _oem_candidate(src: Sources, r: Row, comp, picks: list[Pick], opt: Options, index: PriceIndex) -> None:
+    """Своей цены у конкурента нет — ищем кросс «Да» у нашего двойника по ОЕМ (см. oemcross)."""
+    from .oemcross import candidates
+
+    found = candidates(src, r.brand, r.article, comp.key, svod_comp)
+    if not found:
+        return
+    extra = [Pick(row.cross_article, True, index.get(comp.key, row.cross_key), via=twin.article) for row, twin in found]
+    offers = [o for p in extra for o in p.offers]
+    best = pick_offer(offers, opt.price_pick)
+    if not best:
+        return
+    pick, twin = next(((p, t) for p, (_row, t) in zip(extra, found) if best in p.offers), (extra[0], found[0][1]))
+    use = opt.oem_cross == "use"
+    r.oem[comp.key] = {"price": best.price, "article": pick.article, "twin": twin.article, "twin_brand": twin.brand,
+                       "via": twin.via, "supplier": best.supplier, "used": use}
+    if use:
+        r.picks[comp.key] = picks + extra
+        r.prices[comp.key] = best.price
+        r.best[comp.key] = best
+
+
+def oem_text(r: Row, comp_key: str) -> str:
+    info = (getattr(r, "oem", None) or {}).get(comp_key)
+    if not info:
+        return ""
+    return f"кросс {info['article']} взят у {info['twin_brand']} {info['twin']} (общий ОЕМ {info['via']})"
+
+
 def attach_crosses(src: Sources, rows: list[Row], opt: Options, index: PriceIndex, modes: dict[tuple[str, str], str]) -> None:
     has_svod = bool(src.crosses)
+    oem_on = has_svod and opt.oem_cross != "off" and bool(getattr(src, "oem_rows", None) or getattr(src, "oem", None))
     for r in rows:
+        r.oem = {}
         svod = svod_for(src, r)
         seg_key, _, _ = segment(r, opt.cross_split)
         r.picks, r.prices, r.best = {}, {}, {}
@@ -1203,6 +1239,8 @@ def attach_crosses(src: Sources, rows: list[Row], opt: Options, index: PriceInde
             r.prices[comp.key] = best.price if best else None
             if best:
                 r.best[comp.key] = best
+            elif oem_on:
+                _oem_candidate(src, r, comp, picks, opt, index)
 
 
 def compare_sources(rows: list[Row], src: Sources, opt: Options, settings: Settings) -> list[dict]:

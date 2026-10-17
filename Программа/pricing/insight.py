@@ -480,3 +480,39 @@ def market_signals(rows, prev: dict | None) -> list[dict]:
                         "text": text, "hint": hint})
     out.sort(key=lambda x: -x["n"])
     return out
+
+
+# ---------------------------------------------------------------- кроссы через ОЕМ
+
+
+def oem_summary(rows, src, opt) -> dict:
+    """Что дают кроссы через ОЕМ в этой группе: по конкурентам и список товаров по продажам."""
+    oem_rows = getattr(src, "oem_rows", None) or getattr(src, "oem", None) or []
+    mode = getattr(opt, "oem_cross", "show")
+    out = {"mode": mode, "rows": len(oem_rows), "by_comp": [], "items": [], "gain": 0, "twins": 0}
+    if not oem_rows or mode == "off":
+        return out
+    from .oemcross import twins_for
+    from .sources import norm_text, norm_article
+
+    twins = twins_for(src)
+    out["twins"] = sum(1 for r in rows if twins.get((norm_text(r.brand), norm_article(r.article))))
+    by: dict[str, dict] = {}
+    items = []
+    gain = 0
+    for r in rows:
+        if not r.oem:
+            continue
+        own = any(v for k, v in r.prices.items() if not (r.oem.get(k) or {}).get("used"))
+        gain += not own
+        for comp_key, info in r.oem.items():
+            name = next((c.name for c in r.competitors if c.key == comp_key), comp_key)
+            b = by.setdefault(comp_key, {"name": name, "items": 0})
+            b["items"] += 1
+            dev = 1 - r.cat_a / info["price"] if r.cat_a and info["price"] else None
+            items.append({"code": r.code, "article": r.article, "name": r.variety or r.name, "comp": name,
+                          "price": info["price"], "cross": info["article"], "twin": f"{info['twin_brand']} {info['twin']}",
+                          "via": info["via"], "cat_a": r.cat_a, "dev": dev, "sales": r.sales or 0, "used": info["used"]})
+    items.sort(key=lambda x: -(x["sales"] or 0))
+    out.update(by_comp=sorted(by.values(), key=lambda x: -x["items"]), items=items[:150], gain=gain, count=len(items))
+    return out

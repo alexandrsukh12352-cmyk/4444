@@ -170,6 +170,7 @@ async function start() {
     sheet_filters: Array.isArray(o.sheet_filters) ? o.sheet_filters.slice() : (S.init.default_sheet_filters || ["overstock", "sale", "competitor_price"]).slice(),
     green_when: o.green_when === "below" ? "below" : "above",
     reason_cols: ["all", "short", "none"].includes(o.reason_cols) ? o.reason_cols : "all",
+    oem_cross: ["off", "show", "use"].includes(o.oem_cross) ? o.oem_cross : "show",
     money_base: o.money_base === "potential" ? "potential" : "sales",
     rec: { ...(S.init.rec || {}), ...(o.rec || {}), up: { ...(S.init.default_up || {}), ...((o.rec || {}).up || {}) } },
     ui: "custom",
@@ -219,7 +220,7 @@ async function start() {
 }
 
 const CUSTOM_KEYS = ["base", "sources", "filters", "abc", "cross_modes", "cross_split", "price_source", "price_pick",
-  "monitoring_only", "in_stock_only", "subgroup_mode", "suggest_threshold", "green_when", "reason_cols", "defaults_rev"];
+  "monitoring_only", "in_stock_only", "subgroup_mode", "suggest_threshold", "green_when", "reason_cols", "oem_cross", "defaults_rev"];
 // 2 — цена конкурента по медиане поставщиков и только в наличии (аудит 16 окт).
 const DEFAULTS_REV = 2;
 const REC_NUMS = ["tolerance", "down", "min_vr", "top_factor", "mid_factor", "rounding", "max_lift", "cooldown"];
@@ -2516,6 +2517,25 @@ function renderCoverage() {
         <td class="num">${fmtMoney(x.price)}</td><td class="muted">${esc(x.supplier || "")}</td><td>${esc(x.why)}</td></tr>`).join("")}
       </tbody></table></div></div>`
     : (lo.since ? `<div class="note info">Самопроверка: с ${esc(isoDate(lo.since))} ни одна цена конкурента не пропала.</div>` : "");
+  const om = a.oem || {};
+  const oemMode = S.opts.oem_cross || "show";
+  const oemSeg = `<div class="seg" id="oem-mode">
+      <button type="button" data-v="off">Не искать</button><button type="button" data-v="show">Показывать</button><button type="button" data-v="use">Брать в цену</button></div>`;
+  const oemBox = !om.rows ? `<div class="why-box"><div class="dash-title">Кроссы через ОЕМ</div>
+      <div class="muted small-text">Справочника ОЕМ нет. Положите выгрузку «Печать справочника Товары» с номерами ОЕМ во «Входящие» или в «Данные/Кроссы» — в имени файла «ОЕМ».</div></div>`
+    : `<div class="why-box"><div class="row" style="justify-content:space-between;gap:12px;flex-wrap:wrap">
+        <div class="dash-title" style="margin:0">Кроссы через ОЕМ</div>${oemSeg}</div>
+      <div class="muted small-text" style="margin:6px 0">Своего кросса нет — берём кросс «Да» у нашего товара-двойника с тем же номером ОЕМ и того же вида (диск ADVICS ↔ диск AVANTECH).
+        Справочник: ${fmtInt(om.rows)} строк, двойники есть у ${fmtInt(om.twins || 0)} товаров группы.
+        ${oemMode === "use" ? "Цена кандидата идёт в цель и рекомендацию; в отчёте такая цена курсивом." : oemMode === "show" ? "Сейчас только показываем: в цель и отчёт эти цены не идут." : ""}</div>
+      ${oemMode === "off" ? "" : (om.count ? `<div class="px-brands">${(om.by_comp || []).map((x) => `<span class="tag">${esc(x.name)} +${fmtInt(x.items)}</span>`).join(" ")}
+        <span class="muted small-text">${fmtInt(om.gain)} ${plural(om.gain, "товар", "товара", "товаров")} без единой своей цены получат цену</span></div>
+      <div class="table-wrap scroll"><table class="mini"><thead><tr><th>Артикул</th><th>Конкурент</th><th>Кросс</th><th>Через двойника</th><th>ОЕМ</th>
+        <th class="num">Цена</th><th class="num">Откл.</th><th class="num">Продажи, ₽</th></tr></thead><tbody>
+      ${(om.items || []).slice(0, 60).map((x) => `<tr><td class="nowrap"><b>${esc(x.article)}</b></td><td>${esc(x.comp)}</td><td class="nowrap">${esc(x.cross)}</td>
+        <td class="nowrap">${esc(x.twin)}</td><td class="muted nowrap">${esc(x.via)}</td><td class="num">${fmtMoney(x.price)}</td>
+        <td class="num">${x.dev == null ? "" : fmtPct(x.dev, true)}</td><td class="num">${fmtInt(x.sales)}</td></tr>`).join("")}
+      </tbody></table></div>` : `<div class="muted small-text">Кандидатов нет: у двойников тоже нет кросса с ценой в прайсах.</div>`)}</div>`;
   el.innerHTML = `
     <div class="card-head"><h2>Почему мало цен</h2><span class="sub">путь от товара до цены конкурента: на каком шаге теряются позиции</span>
       <div class="right"><button class="btn small" id="gaps-export" type="button">Выгрузить дыры в кроссах</button></div></div>
@@ -2526,6 +2546,7 @@ function renderCoverage() {
       ${tile("Цен в отчёте", fmtInt(total.final), `${pct(total.final, total.items)}% пар`)}
     </div>
     ${lostBox}
+    ${oemBox}
     ${why}
     <div class="fn-grid">${cards}</div>
     <div class="row tight" style="flex-wrap:wrap; gap:12px; margin:12px 0 4px">
@@ -2540,6 +2561,8 @@ function renderCoverage() {
   if (ratio) ratio.onchange = saveScreen;
   const gaps = $("#gaps-export");
   if (gaps) gaps.onclick = exportGaps;
+  const oemEl = $("#oem-mode");
+  if (oemEl) seg(oemEl, oemMode, (v) => { S.opts.oem_cross = v; persist(); analyze(); });
 }
 
 async function saveScreen() {

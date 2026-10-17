@@ -597,6 +597,26 @@ def short_reason(reason: str) -> str:
     return out
 
 
+def _oem_used(r) -> dict:
+    return {k: v for k, v in (getattr(r, "oem", None) or {}).items() if v.get("used")}
+
+
+def _oem_mark(r) -> str:
+    """Цель взята по цене, найденной через ОЕМ, — так и пишем в причине."""
+    used = _oem_used(r)
+    if not used or not r.target_by:
+        return ""
+    names = {c.key: c.name for c in r.competitors}
+    return " (по ОЕМ)" if any(names.get(k) == r.target_by for k in used) else ""
+
+
+def _oem_notes(r) -> list[str]:
+    from .report import oem_text
+
+    names = {c.key: c.name for c in r.competitors}
+    return [f"цена {names.get(k, k)} по ОЕМ: {oem_text(r, k)}" for k in _oem_used(r)]
+
+
 def both(*cells: str) -> str:
     return "AND(" + ",".join(f"ISNUMBER({c})" for c in cells) + ")"
 
@@ -856,10 +876,10 @@ def report_columns(rows: list[Row], refs: Refs, opt: Options, period: str,
                    f'{L["rec"]}{n}/{L["cat_a"]}{n}-1,"")', CHANGE, key="change", rule="change"),
         ]
         if opt.reason_cols in ("all", "short"):
-            decide.append(Column("Причина", "rec", 30, lambda r, *_: short_reason(r.rec.reason) if r.rec else "", key="reason"))
+            decide.append(Column("Причина", "rec", 30, lambda r, *_: (short_reason(r.rec.reason) + _oem_mark(r)) if r.rec else "", key="reason"))
         extra = []
         if opt.reason_cols == "all":
-            extra.append(Column("Подробно", "rec", 60, lambda r, *_: r.rec.reason if r.rec else "", key="reason_full"))
+            extra.append(Column("Подробно", "rec", 60, lambda r, *_: "; ".join(x for x in [r.rec.reason if r.rec else "", *_oem_notes(r)] if x), key="reason_full"))
         if any(getattr(r, "last_change", None) for r in rows):
             from .pricehistory import change_text
 
@@ -1009,6 +1029,8 @@ def write_report_sheet(ws, title: str, rows: list[Row], refs: Refs, opt: Options
                 cell.fill = tones[c.tone]
             if c.key == "article":
                 cell.font = Font(name=style.FONT, bold=True, color=style.INK)
+            elif c.key.startswith("price:") and c.key[6:] in _oem_used(r):
+                cell.font = Font(name=style.FONT, italic=True, color=style.INK)  # цена найдена через ОЕМ
             elif c.key == "reason_full":
                 cell.font = small
 

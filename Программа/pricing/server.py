@@ -126,6 +126,10 @@ class State:
             base = ready
         src = _with_incoming_acp(base, ws, brand, group, trust_local=bool(pack and _is_group_pack(pack)))
         src.oem_rows = list(getattr(ws, "oem_rows", None) or [])
+        if any(not item.brand for item in src.oem_rows):
+            from .sources import fill_oem_brands
+
+            fill_oem_brands(src.oem_rows, getattr(src, "pst", None) or [])
         src.sister_prices = price_book(ws, Settings.load()) if sisters else {}
         src._dormant_owner = ws.shared  # type: ignore[attr-defined]
         src._group_args = (root, brand, group, sisters)  # type: ignore[attr-defined]
@@ -1312,6 +1316,7 @@ def api_analyze(body: dict) -> dict:
         "history": insight.history_for(opt.brand, opt.group),
         "losses": insight.loss_reasons(prep, files),
         "signals": list(prep.signals) + currency_signals(folder, final),
+        "oem": insight.oem_summary(final, src, opt),
     }
 
 
@@ -1482,7 +1487,7 @@ def api_build(body: dict) -> dict:
         price_source=opt.price_source, monitoring_only=opt.monitoring_only, in_stock_only=opt.in_stock_only,
         brand=opt.brand, group=opt.group, report_kind=opt.report_kind,
         sheet_filters=report.sheet_filter_keys(opt),
-        green_when=opt.green_when, reason_cols=opt.reason_cols, ui=incoming.get("ui") or settings.options.get("ui") or "template",
+        green_when=opt.green_when, reason_cols=opt.reason_cols, oem_cross=opt.oem_cross, ui=incoming.get("ui") or settings.options.get("ui") or "template",
     )
     _remember_rec(settings, incoming)
     settings.save()

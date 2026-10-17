@@ -359,6 +359,8 @@ OEM_COLUMNS = {
     "oem": [r"оем", r"oem"],
 }
 OEM_REQUIRED = ("article", "brand", "oem")
+# «Печать справочника Товары» из 1С: торговой марки нет, есть код товара — марка берётся из ПСТ по коду.
+OEM_REQUIRED_BY_CODE = ("code", "article", "oem")
 
 
 @dataclass
@@ -372,7 +374,7 @@ class OemItem:
 
 def classify_oem(sheet: Sheet) -> Located | None:
     """Справочник «ОЕМ ТМ+ТМ»: артикул, марка и номера ОЕМ. Это не ПСТ и не прайс."""
-    loc = locate(sheet, OEM_COLUMNS, OEM_REQUIRED)
+    loc = locate(sheet, OEM_COLUMNS, OEM_REQUIRED) or locate(sheet, OEM_COLUMNS, OEM_REQUIRED_BY_CODE)
     if not loc:
         return None
     # Файл «ОЕМ …» читаем, даже если в нём есть столбцы как у ПСТ.
@@ -1053,12 +1055,21 @@ def read_gz(loc: Located) -> dict[str, float]:
     return result
 
 
+_CYR = re.compile(r"[А-Яа-яЁё]")
+
+
 def _oem_numbers(text) -> list[str]:
-    """Номера из ячейки «ОЕМ-номер». Составные артикулы через «+» не режем: это комплект, не список ОЕМ."""
+    """Номера из ячейки «ОЕМ-номер». Составные артикулы через «+» не режем: это комплект, не список ОЕМ.
+
+    Номер ОЕМ — латиница и цифры, хотя бы одна цифра, не длиннее 24 знаков. У аккумуляторов в этом
+    поле характеристики («Номинальная емкость (Ач) : …») — это не номера, и общими они быть не должны.
+    """
     out = []
     for part in re.split(r"[,;/|\n]+", clean(text)):
+        if _CYR.search(part):
+            continue
         key = norm_article(part)
-        if len(key) >= 5:
+        if 5 <= len(key) <= 24 and any(ch.isdigit() for ch in key):
             out.append(key)
     return out
 
@@ -1071,7 +1082,8 @@ def read_oem(loc: Located) -> list[OemItem]:
     for row in loc.header.data:
         article = clean(loc.get(row, "article"))
         brand = clean(loc.get(row, "brand"))
-        if not article or not brand or _is_total(row, loc):
+        code = code_key(loc.get(row, "code"))
+        if not article or not (brand or code) or _is_total(row, loc) or article.casefold() == "артикул":
             continue
         oems: list[str] = []
         for idx in cols:
@@ -1082,7 +1094,7 @@ def read_oem(loc: Located) -> list[OemItem]:
             brand=brand,
             article=article,
             name=clean(loc.get(row, "name")),
-            code=code_key(loc.get(row, "code")),
+            code=code,
             oems=list(dict.fromkeys(oems)),
         ))
     return items
@@ -1148,7 +1160,28 @@ def load_all(src: Sources) -> None:
     src.oem = []
     for loc in src.found.get("oem") or []:
         src.oem.extend(read_oem(loc))
+    fill_oem_brands(src.oem, src.pst)
     src.oem_rows = list(src.oem)
+
+
+def fill_oem_brands(items: list[OemItem], pst) -> int:
+    """Марка у строк ОЕМ без столбца «Торговая марка»: из ПСТ по коду, иначе по марке в наименовании."""
+    empty = [i for i in items if not i.brand]
+    if not empty:
+        return 0
+    by_code = {p.code: p.brand for p in pst or [] if p.code and p.brand}
+    brands = sorted({b for b in by_code.values()} | {i.brand for i in items if i.brand}, key=len, reverse=True)
+    words = [(b, norm_text(b)) for b in brands if len(b) >= 3]
+    filled = 0
+    for item in empty:
+        brand = by_code.get(item.code, "")
+        if not brand:
+            name = norm_text(item.name)
+            brand = next((b for b, key in words if re.search(rf"(^|\s){re.escape(key)}(\s|$)", name)), "")
+        if brand:
+            item.brand = brand
+            filled += 1
+    return filled
 
 
 def discount_for(src: Sources, subgroup: str, order_group: str, brand: str) -> float | None:
