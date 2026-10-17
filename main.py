@@ -2,7 +2,8 @@
 """Ценовой анализ: окно программы в браузере.
 
 Запуск: «Запуск.bat» (Windows) или `python main.py`.
-Ключи: --port N (по умолчанию 47615), --no-browser (не открывать окно сам).
+Ключи: --port N (по умолчанию 47615), --no-browser (не открывать окно сам),
+--sort-prices (только разложить прайсы по папкам, как «Разложить прайсы.bat»).
 """
 
 from __future__ import annotations
@@ -46,6 +47,23 @@ def open_window(url: str) -> None:
     webbrowser.open(url)
 
 
+def sort_only() -> int:
+    """«Разложить прайсы.bat»: распаковать архивы и разложить файлы по папкам «дата / поставщик»."""
+    from pricing.server import ensure_layout, sort_prices
+    from pricing.settings import Settings
+
+    ensure_layout(ROOT)
+    print()
+    print("  Раскладываю прайсы в «Данные/Прайсы»...")
+    result = sort_prices(ROOT, Settings.load())
+    lines = (result or {}).get("lines") or []
+    print()
+    for line in lines or ["Новых файлов нет — всё уже разложено."]:
+        print("  " + line)
+    print()
+    return 0
+
+
 def main(argv=None) -> int:
     for stream in (sys.stdout, sys.stderr):
         try:
@@ -56,6 +74,7 @@ def main(argv=None) -> int:
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--no-browser", action="store_true")
+    parser.add_argument("--sort-prices", action="store_true", help="только разложить прайсы по папкам и выйти")
     args = parser.parse_args(argv)
 
     try:
@@ -63,6 +82,9 @@ def main(argv=None) -> int:
     except ImportError:
         print("Не установлен модуль openpyxl. Выполните: python -m pip install openpyxl")
         return 1
+
+    if args.sort_prices:
+        return sort_only()
 
     from pricing import filecache
     from pricing.server import ensure_layout, serve

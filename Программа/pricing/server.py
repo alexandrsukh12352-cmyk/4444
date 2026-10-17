@@ -17,7 +17,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import bootlog, check, crossdump, dynamics, filecache, insight, price_analytics, price_check, pricearchive, prices, report
+from . import bootlog, check, crossdump, dynamics, filecache, insight, price_analytics, price_check, pricearchive, prices, pricesort, report
 from .cars import SEGMENTS, UNKNOWN, load_default as cars_default
 from .dashboard import summary as dashboard_summary
 from .excel import clean, num
@@ -1117,6 +1117,7 @@ def _api_scan_body(body: dict) -> dict:
     bootlog.step("Папка", str(folder))
     if not folder.exists():
         raise UserFacing(f"Папка не найдена: {folder}")
+    sorted_prices = sort_prices(folder, settings) if _workspace_root(folder) else None
     if _workspace_root(folder):
         ensure_layout(folder)
         ws = STATE.workspace(folder)
@@ -1165,10 +1166,33 @@ def _api_scan_body(body: dict) -> dict:
         "brand_hints": brand_hints_payload(src, settings),
         "rates_check": rates_check(folder, settings),
         "price_archive": pricearchive.preview(folder) if _workspace_root(folder) else None,
+        "price_sorted": sorted_prices,
         "brand_aliases": settings.brand_aliases,
         "brand_ignore": settings.options.get("brand_ignore") or [],
         "price_waiting": _waiting_prices(src),
     }
+
+
+def sort_prices(folder: Path, settings: Settings) -> dict | None:
+    """Новые файлы и архивы в «Прайсах» — по папкам «дата / поставщик». Ошибка раскладки не мешает запуску."""
+    try:
+        from types import SimpleNamespace
+
+        known = report.known_suppliers(report.load_positioning(SimpleNamespace(located=lambda kind: None), settings))
+    except Exception:  # noqa: BLE001
+        known = []
+    keep = set()
+    for key in settings.price_files:
+        parts = [p.strip() for p in str(key).split(" / ")]
+        if len(parts) >= 2 and prices._normalize_date(parts[0]):
+            keep.add(parts[1])  # «дата / файл / лист» — у файла в папке-дате есть ручные настройки
+    try:
+        bootlog.step("Раскладываю прайсы", "новые файлы и архивы — по папкам поставщиков")
+        result = pricesort.sort_prices(folder, known, keep=keep)
+    except Exception as exc:  # noqa: BLE001
+        return {"moved": [], "unpacked": [], "unknown": [], "dup": 0, "errors": [{"file": "", "why": str(exc)}], "lines": []}
+    result["lines"] = pricesort.summary_lines(result)
+    return result
 
 
 def _waiting_prices(src: Sources) -> list[dict]:

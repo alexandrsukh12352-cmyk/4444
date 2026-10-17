@@ -32,6 +32,7 @@ body { margin: 0; min-height: 100vh; }
 button, input, select { font: inherit; color: inherit; }
 .hidden, [hidden] { display: none !important; }
 .muted { color: var(--muted); }
+.warn-text { color: var(--amber); }
 .num { font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
 .nowrap { white-space: nowrap; }
 

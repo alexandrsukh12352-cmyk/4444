@@ -1943,7 +1943,20 @@ async function writePriceExport() {
   }
 }
 
+function renderSorted() {
+  const box = $("#px-sorted");
+  if (!box) return;
+  const r = (S.scan && S.scan.price_sorted) || null;
+  const lines = (r && r.lines) || [];
+  box.classList.toggle("hidden", !lines.length);
+  box.innerHTML = lines.map((t) => {
+    const bad = /^Не (узнал|получилось)/.test(t);
+    return `<div class="${bad ? "warn-text" : "muted"}">${esc(t)}</div>`;
+  }).join("");
+}
+
 function renderArchive() {
+  renderSorted();
   const a = (S.scan && S.scan.price_archive) || null;
   const btn = $("#px-compact");
   const note = $("#px-archive");
