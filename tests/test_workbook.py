@@ -34,12 +34,16 @@ def settings():
     return Settings.load(None)
 
 
+def _head_row(ws):
+    return next(r for r in range(1, 8) if any(c.value == "Артикул" for c in ws[r]))
+
+
 def _header(ws):
-    return {c.value: c.column for c in ws[3] if c.value}
+    return {c.value: c.column for c in ws[_head_row(ws)] if c.value}
 
 
 def _row(ws, code):
-    for row in ws.iter_rows(min_row=3):
+    for row in ws.iter_rows(min_row=_head_row(ws)):
         if row[0].value == code:
             return row[0].row
     raise AssertionError(code)
@@ -216,9 +220,9 @@ def _block(ws, title):
 def test_full_report_formulas_match_python(tmp_path, src, settings):
     opt, prep, result, wb = _build(tmp_path, src, settings, rec={"enabled": True, "target": "main"})
     assert result.kind == "full"
-    assert wb.sheetnames[:3] == ["Итоги", "Отчет", "Цены"] and "Дашборд" not in wb.sheetnames and "Параметры" not in wb.sheetnames
+    assert wb.sheetnames[:3] == ["Сводка", "Товары", "Цены конкурентов"] and "Дашборд" not in wb.sheetnames and "Параметры" not in wb.sheetnames
     assert {"ПСТ", "СБС", "Продажи"} <= set(wb.sheetnames)
-    assert wb["ПСТ"].sheet_state == "hidden" and wb["Отчет"].sheet_state == "visible"
+    assert wb["ПСТ"].sheet_state == "hidden" and wb["Товары"].sheet_state == "visible"
     assert any(c.value == "Код товара" for row in wb["ПСТ"].iter_rows(max_row=4) for c in row)
     assert result.path.name == "ADVICS Тормозные диски.xlsx"
     brief = result.brief.read_text(encoding="utf-8-sig")
@@ -226,13 +230,13 @@ def test_full_report_formulas_match_python(tmp_path, src, settings):
     assert result.path.parent.name == "Целевые группы"
     assert "Advics Тормозные диски" in brief and "===" not in brief
 
-    ws = wb["Отчет"]
+    ws = wb["Товары"]
     head = _header(ws)
     assert "Курс" not in head and "ГЗ" not in head and "Скидка, %" not in head
-    assert head["Продажи, шт"] and head["Продажи, руб."]
-    n_fmt = ws.cell(_row(ws, 130909), head["Кат. А"]).number_format
+    assert head["Продажи, шт"] and head["Продажи, ₽"]
+    n_fmt = ws.cell(_row(ws, 130909), head["Кат. А, ₽"]).number_format
     assert n_fmt.startswith("#,##0")
-    assert ws.cell(_row(ws, 130909), head["Остаток"]).number_format.startswith("#,##0")
+    assert ws.cell(_row(ws, 130909), head["Остаток, шт"]).number_format.startswith("#,##0")
     n = _row(ws, 130909)
     row = next(r for r in prep.kept if r.code == "130909")
     col = lambda title: openpyxl.utils.get_column_letter(head[title])  # noqa: E731
@@ -240,25 +244,25 @@ def test_full_report_formulas_match_python(tmp_path, src, settings):
     def val(title):
         return cell(wb, ws.title, f"{col(title)}{n}")
 
-    assert val("Закупочная цена") == pytest.approx(row.purchase_rub)
-    assert val("СБС план") == pytest.approx(row.sbs_plan)
-    assert val("Кат. А") == pytest.approx(row.cat_a)
-    assert val("ВР 1") == pytest.approx(1 - row.sbs / row.cat_a)
-    assert "СБС план" in str(ws.cell(n, head["ВР 1"]).value) or head["СБС план"] and f'{openpyxl.utils.get_column_letter(head["СБС план"])}{n}' in str(ws.cell(n, head["ВР 1"]).value)
-    assert val("Сумма продажи") == pytest.approx(row.sales_qty * row.cat_a)
-    assert isinstance(ws.cell(n, head["Brembo цена"]).value, float)
-    assert val("Brembo цена") == pytest.approx(row.prices["BREMBO"])
-    assert "INDEX" in str(ws.cell(n, head["МО"]).value)
-    assert "ПСТ" in str(ws.cell(n, head["МО"]).value)
-    assert {"Цель", "По кому цель", "Откл. от цели", "Почему"} <= set(head)
+    assert val("Закупка, ₽") == pytest.approx(row.purchase_rub)
+    assert val("СБС план, ₽") == pytest.approx(row.sbs_plan)
+    assert val("Кат. А, ₽") == pytest.approx(row.cat_a)
+    assert val("ВР") == pytest.approx(1 - row.sbs / row.cat_a)
+    assert "СБС план" in str(ws.cell(n, head["ВР"]).value) or head["СБС план, ₽"] and f'{openpyxl.utils.get_column_letter(head["СБС план, ₽"])}{n}' in str(ws.cell(n, head["ВР"]).value)
+    assert val("Сумма продажи, ₽") == pytest.approx(row.sales_qty * row.cat_a)
+    assert isinstance(ws.cell(n, head["Brembo, ₽"]).value, float)
+    assert val("Brembo, ₽") == pytest.approx(row.prices["BREMBO"])
+    assert "INDEX" in str(ws.cell(n, head["МО, ₽"]).value)
+    assert "ПСТ" in str(ws.cell(n, head["МО, ₽"]).value)
+    assert {"Цель, ₽", "По кому цель", "Откл. от цели", "Причина", "Подробно"} <= set(head)
     assert "В пути, шт" not in head and "Потенциал, шт" not in head
-    assert val("Рек. кат. А") == pytest.approx(row.rec.price)
-    assert val("Изм. %") == pytest.approx(row.rec.change)
-    assert val("ВР рек.") == pytest.approx(1 - row.sbs / row.rec.price)
+    assert val("Новая цена, ₽") == pytest.approx(row.rec.price)
+    assert val("Изм.") == pytest.approx(row.rec.change)
+    assert val("ВР после") == pytest.approx(1 - row.sbs / row.rec.price)
     assert "Основание" not in head and "Brembo" not in head
-    assert wb["Отчет"].cell(3, 1).fill.fill_type == "solid"
+    assert wb["Товары"].cell(4, 1).fill.fill_type == "solid"
     for other in wb.worksheets:
-        if other.title in ("Отчет", "Списки", "Итоги", "Цены", "Графики"):
+        if other.title in ("Товары", "Списки", "Сводка", "Цены конкурентов", "Графики"):
             continue
         assert other.tables == {}
         assert list(other.conditional_formatting) == []
@@ -280,52 +284,52 @@ def test_subgroup_sheets_and_modes(tmp_path, src, settings):
                 names = result.sheets
                 assert "Дашборд" not in names
                 assert "Спортивные тормозные диски" not in names
-                assert "Отчет" in names
+                assert "Товары" in names
                 assert "Параметры" not in names
                 assert "ПСТ" in names and "СБС" in names and "Продажи" in names
-                assert "Цены конкурентов" not in names and "Справочники" not in names and "Данные" not in names
+                assert "Цены конкурентов" in names and "Справочники" not in names and "Данные" not in names
                 if enabled:
                     wb = openpyxl.load_workbook(result.path)
-                    assert "Рек. кат. А" in [c.value for c in wb["Отчет"][3]]
+                    assert "Новая цена, ₽" in [c.value for c in wb["Товары"][4]]
                     assert wb["ПСТ"].sheet_state == "hidden"
-                    assert wb["Отчет"].sheet_state == "visible"
+                    assert wb["Товары"].sheet_state == "visible"
 
 
 def test_competitor_price_is_a_number(tmp_path, src, settings):
     _, prep, _, wb = _build(tmp_path, src, settings)
-    ws = wb["Отчет"]
+    ws = wb["Товары"]
     n = _row(ws, 130909)
     head = _header(ws)
     row = next(r for r in prep.kept if r.code == "130909")
-    assert ws.cell(n, head["Brembo цена"]).value == pytest.approx(row.prices["BREMBO"])
-    assert ws.cell(n, head["Brembo цена"]).number_format.startswith("#,##0")
-    assert "Кроссы" not in str(ws.cell(n, head["Brembo цена"]).value)
+    assert ws.cell(n, head["Brembo, ₽"]).value == pytest.approx(row.prices["BREMBO"])
+    assert ws.cell(n, head["Brembo, ₽"]).number_format.startswith("#,##0")
+    assert "Кроссы" not in str(ws.cell(n, head["Brembo, ₽"]).value)
 
 
 def test_summary_and_prices_sheets_link_to_the_report(tmp_path, src, settings):
     opt, prep, result, wb = _build(tmp_path, src, settings, rec={"enabled": True, "target": "main"})
-    assert wb.active.title == "Итоги"
-    itogi = wb["Итоги"]
-    assert itogi.sheet_state == "visible" and wb["Цены"].sheet_state == "visible"
+    assert wb.active.title == "Сводка"
+    itogi = wb["Сводка"]
+    assert itogi.sheet_state == "visible" and wb["Цены конкурентов"].sheet_state == "visible"
     texts = [c.value for row in itogi.iter_rows() for c in row if isinstance(c.value, str)]
-    assert any(t.startswith("=") and "'Отчет'!" in t for t in texts)
+    assert any(t.startswith("=") and "'Товары'!" in t for t in texts)
     assert "По подгруппам" in texts and "Итого" in texts
     assert not any("#REF" in t for t in texts)
 
-    report = wb["Отчет"]
+    report = wb["Товары"]
     head = _header(report)
-    assert {"Цель", "По кому цель", "Откл. от цели", "Почему"} <= set(head)
+    assert {"Цель, ₽", "По кому цель", "Откл. от цели", "Причина", "Подробно"} <= set(head)
     row = next(r for r in prep.kept if r.target)
     n = _row(report, int(row.code) if row.code.isdigit() else row.code)
-    assert report.cell(n, head["Цель"]).value == pytest.approx(round(row.target, 2))
-    assert report.cell(n, head["Почему"]).value == row.rec.reason
+    assert report.cell(n, head["Цель, ₽"]).value == pytest.approx(round(row.target, 2))
+    assert report.cell(n, head["Подробно"]).value == row.rec.reason
 
-    prices = wb["Цены"]
+    prices = wb["Цены конкурентов"]
     phead = {c.value: c.column for c in prices[3] if c.value}
     assert list(phead)[:6] == ["Артикул", "Наименование", "Группа", "Подгруппа", "Разновидность", "ABC"]
-    assert "Кат. А" in phead and "Brembo цена" in phead and "Откл Brembo" in phead
+    assert "Кат. А, ₽" in phead and "Brembo, ₽" in phead and "Откл." in phead
     m = next(c.row for c in prices["A"] if c.value == row.article)
-    assert "'Отчет'!" in prices.cell(m, phead["Кат. А"]).value
+    assert "'Товары'!" in prices.cell(m, phead["Кат. А, ₽"]).value
 
 
 def test_cross_sheet_lists_selected_articles_and_supplier_prices(tmp_path, src, settings):
@@ -346,8 +350,8 @@ def test_cross_sheet_lists_selected_articles_and_supplier_prices(tmp_path, src, 
     min_col = next(i for i, value in enumerate(headers) if value == "Мин" and i >= brand_col - 1)
     assert str(data[min_col].value).startswith("=IF(COUNT(")
     assert cell(wb, "Кроссы", data[min_col].coordinate) == pytest.approx(row.prices["BREMBO"])
-    report = wb["Отчет"]
-    assert isinstance(report.cell(_row(report, 130909), _header(report)["Brembo цена"]).value, float)
+    report = wb["Товары"]
+    assert isinstance(report.cell(_row(report, 130909), _header(report)["Brembo, ₽"]).value, float)
 
 
 def test_sheet_filters_do_not_write_the_excel_row(tmp_path, src, settings):
@@ -359,11 +363,10 @@ def test_sheet_filters_do_not_write_the_excel_row(tmp_path, src, settings):
     assert all(r.code != "130909" for r in prep.kept)
     result = R.build_report(split, settings, opt, tmp_path)
     wb = openpyxl.load_workbook(result.path)
-    ws = wb["Отчет"]
-    assert [c.value for c in ws[1] if c.value] == []
-    assert "Показ" not in [c.value for c in ws[3]]
+    ws = wb["Товары"]
+    assert not any("Показ" in str(c.value or "") for r in range(1, 5) for c in ws[r])
     assert "Списки" not in wb.sheetnames
-    assert ws.auto_filter.ref.startswith("A3:")
+    assert ws.auto_filter.ref.startswith("A4:")
     assert list(ws.auto_filter.filterColumn) == []
     with pytest.raises(AssertionError):
         _row(ws, 130909)
@@ -459,5 +462,17 @@ def test_recent_sales_drive_the_no_sales_rule(tmp_path, settings):
     quiet = [r for r in prep.kept if r.sales3 == 0 and r.rec and r.rec.kind in ("up", "vr") and not R.is_new(r)]
     assert quiet == []
     result = R.build_report(src3, settings, opt, tmp_path / "out")
-    head = _header(openpyxl.load_workbook(result.path)["Отчет"])
-    assert "Продажи 3 мес, шт" in head or "Продажи 3 мес, руб." in head
+    head = _header(openpyxl.load_workbook(result.path)["Товары"])
+    assert "Продажи 3 мес, шт" in head or "Продажи 3 мес, ₽" in head
+
+
+def test_short_reasons_for_the_report():
+    from pricing.workbook import short_reason
+
+    assert short_reason("к цели Brembo, ограничено +5%") == "к Brembo, шаг ограничен"
+    assert short_reason("нет цены конкурента") == "нет цены конкурента"
+    assert short_reason("топ продаж, категория A — не снижаем (Brembo)") == "топ — не снижаем"
+    assert short_reason("в пределах позиционирования (Brembo)") == "у цели (Brembo)"
+    assert short_reason("нет продаж — цену не поднимаем") == "нет продаж"
+    assert short_reason("цену меняли 15.09.2026: +5,0%, по рекомендации — не трогаем до 14.12.2026, ждём") == "меняли 15.09, ждём до 14.12"
+    assert short_reason("к цели Brembo; не ниже ВР 30%") == "к Brembo, мин. ВР"

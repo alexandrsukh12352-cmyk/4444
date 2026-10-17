@@ -29,6 +29,24 @@ BAD = argb("FEE2E2")
 BAD_INK = argb("991B1B")
 WARN = argb("FEF3C7")
 
+# Отчёт «как сделал бы человек в Excel»: серая шапка, тонкие серые линии, стандартные светлые
+# тона палитры Excel (на 80% светлее) для столбцов, которые нужно находить глазами.
+XL_HEAD = argb("D9D9D9")
+XL_EDGE = argb("A6A6A6")
+XL_GRID = argb("D9D9D9")
+XL_TOTAL = argb("F2F2F2")
+XL_BAND = argb("404040")
+XL_MUTED = argb("595959")
+XL_GREEN = argb("008000")
+XL_RED = argb("C00000")
+XL_CAT_A = argb("DDEBF7")  # наша цена — голубой
+XL_NEW = argb("FFF2CC")  # новая цена, её правят — жёлтый
+XL_COMP = (argb("FCE4D6"), argb("EDEDED"))  # конкуренты через одного: персиковый и серый
+XL_SISTER = argb("E2EFDA")
+XL_CELL = Border(*(Side(style="thin", color=XL_GRID),) * 4)
+XL_HEAD_BORDER = Border(*(Side(style="thin", color=XL_EDGE),) * 4)
+RUB = '#,##0'
+
 THIN = Side(style="thin", color=LINE)
 BORDER = Border(bottom=THIN)
 HEADER_BORDER = Border(bottom=Side(style="medium", color=ACCENT))
@@ -114,3 +132,18 @@ def write_table(
         current = ws.column_dimensions[get_column_letter(col)].width
         ws.column_dimensions[get_column_letter(col)].width = max(width, current or 0) if current and current != 13 else width
     return head
+
+
+def print_wide(ws, title_rows: str = "") -> None:
+    """Печать: альбомный лист, по ширине на одну страницу, шапка повторяется на каждой."""
+    from openpyxl.worksheet.properties import PageSetupProperties
+
+    ws.page_setup.orientation = "landscape"
+    ws.page_setup.paperSize = ws.PAPERSIZE_A4
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 0
+    ws.sheet_properties.pageSetUpPr = PageSetupProperties(fitToPage=True)
+    ws.page_margins.left = ws.page_margins.right = 0.4
+    ws.page_margins.top = ws.page_margins.bottom = 0.5
+    if title_rows:
+        ws.print_title_rows = title_rows

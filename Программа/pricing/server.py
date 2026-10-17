@@ -1311,7 +1311,54 @@ def api_analyze(body: dict) -> dict:
         "screen": insight.screen_options(settings),
         "history": insight.history_for(opt.brand, opt.group),
         "losses": insight.loss_reasons(prep, files),
+        "signals": list(prep.signals) + currency_signals(folder, final),
     }
+
+
+RATE_MOVE = 0.03  # курс сдвинулся на 3% и больше — сигнал
+
+
+def currency_signals(folder: Path, rows) -> list[dict]:
+    """Курс закупочной валюты этой группы заметно сдвинулся за последние две недели (по файлу «валюта»)."""
+    try:
+        rates = (dynamics.read_currency(folder) or {}).get("rates") or {}
+    except Exception:  # noqa: BLE001
+        return []
+    used: dict[str, int] = {}
+    for r in rows:
+        cur = str(getattr(r, "purchase_currency", "") or "").upper()
+        if cur and cur not in ("RUB", "РУБ", "RUR"):
+            used[cur] = used.get(cur, 0) + 1
+    out = []
+    for code, series in rates.items():
+        items = sum(n for cur, n in used.items() if code.upper() in cur)
+        if not items:
+            continue
+        points = []
+        for day, value in (series or {}).items():
+            try:
+                points.append((dt.datetime.strptime(day, "%d.%m.%Y").date(), float(value)))
+            except (TypeError, ValueError):
+                continue
+        points.sort()
+        if len(points) < 2:
+            continue
+        last_day, last = points[-1]
+        older = [p for p in points if p[0] <= last_day - dt.timedelta(days=14)] or \
+            [p for p in points if p[0] <= last_day - dt.timedelta(days=7)]
+        if not older or not older[-1][1]:
+            continue
+        base_day, base = older[-1]
+        change = last / base - 1
+        if abs(change) < RATE_MOVE:
+            continue
+        pct = f"{change * 100:+.1f}".replace(".", ",")
+        side = "дорожает" if change > 0 else "дешевеет"
+        out.append({"comp": code, "side": "up" if change > 0 else "down", "n": items, "of": len(rows), "median": change,
+                    "since": base_day.strftime("%d.%m"), "kind": "rate",
+                    "text": f"Курс {code} {pct}% с {base_day:%d.%m} — закупка {side} у {items} товаров",
+                    "hint": "СБС план и ВР по ним сдвинутся со следующей закупкой"})
+    return out
 
 
 def _any_index(src: Sources, opt: report.Options, files, positioning):

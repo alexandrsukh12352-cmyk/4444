@@ -2329,7 +2329,7 @@ function attention(d) {
   const dear = pos.filter((p) => p.key.startsWith("d")).reduce((s, p) => s + p.sale, 0);
   const cheap = pos.filter((p) => p.key.startsWith("c")).reduce((s, p) => s + p.sale, 0);
   if (total && none / total >= 0.3) {
-    out.push({ kind: "warn", text: `${Math.round(none / total * 100)}% выручки — без цены конкурента. По этим товарам рекомендация видит только ВР. Самые продаваемые из них — на листе «Итоги», блок «Проценить вручную». Почему так — вкладка «Почему мало цен».` });
+    out.push({ kind: "warn", text: `${Math.round(none / total * 100)}% выручки — без цены конкурента. По этим товарам рекомендация видит только ВР. В отчёте на листе «Товары» их видно по причине «нет цены конкурента». Почему так — вкладка «Почему мало цен».` });
   }
   if (priced && dear / priced >= 0.3) out.push({ kind: "dn", text: `Дороже цели ${Math.round(dear / priced * 100)}% выручки с ценой конкурента. Снижать стоит адресно: топ, где разрыв большой, — и смотреть, окупится ли.` });
   if (priced && cheap / priced >= 0.3) out.push({ kind: "up", text: `Дешевле цели ${Math.round(cheap / priced * 100)}% выручки с ценой конкурента — это запас для повышения.` });
@@ -2342,6 +2342,9 @@ function attention(d) {
   const dn = d.rec_enabled && d.bridge && d.bridge.down;
   if (dn && dn.items && dn.need_lift != null && dn.need_lift > 0.15) {
     out.push({ kind: "dn", text: `Снижения (${fmtInt(dn.items)} тов.) окупятся только при росте их продаж на ${fmtPct(dn.need_lift)}.` });
+  }
+  for (const sg of ((S.analysis && S.analysis.signals) || []).slice(0, 2)) {
+    out.push({ kind: sg.side === "up" ? "up" : "dn", text: `${sg.text}: ${sg.hint}.` });
   }
   const lo = (S.analysis && S.analysis.losses) || {};
   if (lo.count) out.push({ kind: "warn", text: `С ${isoDate(lo.since)} пропала цена конкурента у ${fmtInt(lo.count)} ${plural(lo.count, "пары", "пар", "пар")} товар–конкурент — список и причины во вкладке «Почему мало цен».` });

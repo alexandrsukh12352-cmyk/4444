@@ -181,10 +181,10 @@ def test_transit_total_ignores_cities_and_matches_without_signs(tmp_path):
 
     result = R.build_report(src, Settings.load(None), R.Options(brand="ADVICS", group="Тормозные диски", report_kind="quick"), tmp_path)
     wb = openpyxl.load_workbook(result.path)
-    head = [c.value for c in wb["Отчет"][3]]
-    assert head[head.index("Остаток") + 1] == "В пути, шт"
+    head = [c.value for c in wb["Товары"][4]]
+    assert head[head.index("Остаток, шт") + 1] == "В пути, шт"
     assert head[head.index("В пути, шт") + 1] == "Потенциал, шт"
-    rows = {r[0].value: r for r in wb["Отчет"].iter_rows(min_row=3)}
+    rows = {r[0].value: r for r in wb["Товары"].iter_rows(min_row=4)}
     transit_col = head.index("В пути, шт")
     potential_col = head.index("Потенциал, шт")
     assert rows[2][transit_col].value == 32
@@ -193,11 +193,11 @@ def test_transit_total_ignores_cities_and_matches_without_signs(tmp_path):
     sys.path.insert(0, str(ROOT / "tests"))
     from xlcalc import cell
     letter = openpyxl.utils.get_column_letter(potential_col + 1)
-    assert cell(wb, "Отчет", f"{letter}{rows[2][0].row}") == 32
+    assert cell(wb, "Товары", f"{letter}{rows[2][0].row}") == 32
     assert "Параметры" not in wb.sheetnames
     assert wb["ПСТ"].sheet_state == "hidden"
     assert wb["ПСТ"]["A1"].fill.fill_type is None
-    assert wb["Отчет"].cell(3, 1).fill.fill_type == "solid"
+    assert wb["Товары"].cell(4, 1).fill.fill_type == "solid"
 
 
 def test_incoming_base_replaces_the_same_document_in_the_group(tmp_path):

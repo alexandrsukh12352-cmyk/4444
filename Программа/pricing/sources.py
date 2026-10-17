@@ -280,7 +280,7 @@ KIND_TITLES = {k: t for k, t, _, _ in KINDS} | {
     "positioning": "Позиционирование", "gz": "ГЗ", "transit": "Товар в пути", "oem": "ОЕМ",
     "sales3": "Продажи за 3 месяца",
 }
-RESULT_MARKERS = {"Сводка", "Для заноса", "По артикулам", "Отчет", "Расч"}
+RESULT_MARKERS = {"Сводка", "Для заноса", "По артикулам", "Отчет", "Товары", "Расч"}
 DATA_DIRS = {"1c": "Выгрузки 1С", "crosses": "Кроссы", "prices": "Прайсы"}
 SCAN_PRICE_ROWS = 60
 
@@ -653,6 +653,8 @@ def _is_finished_report(sheets: list[Sheet]) -> bool:
         or ("Отчет" in names and bool({"ПСТ", "СБС", "Продажи", "Параметры"} & names))
         or {"ПСТ", "Параметры"} <= names
         or ({"ПСТ", "СБС", "Продажи"} <= names and "Отчет" in names)
+        or ({"Сводка", "Товары"} <= names)
+        or ("Товары" in names and bool({"ПСТ", "СБС", "Продажи", "Кроссы"} & names))
     ):
         return True
     for s in sheets:

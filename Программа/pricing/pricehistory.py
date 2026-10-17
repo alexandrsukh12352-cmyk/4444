@@ -235,3 +235,9 @@ def track_priced(key: str, rows, today: dt.date | None = None, path: Path | None
             store.pop(old, None)
     save(data, path)
     return (prev or {}).get("date", ""), losses
+
+
+def priced_before(key: str, path: Path | None = None) -> dict | None:
+    """Снимок цен конкурентов с прошлого дня прогона: {date, items: {код: {конкурент: [цена, поставщик]}}}."""
+    entry = (load(path).get("priced") or {}).get(key) or {}
+    return entry.get("prev")

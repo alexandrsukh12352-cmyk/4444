@@ -1240,6 +1240,7 @@ class Prepared:
     screened: dict = field(default_factory=dict)  # причина отсева -> сколько пар
     losses_since: str = ""  # самопроверка: дата прошлого прогона с теми же настройками цен
     losses: list = field(default_factory=list)  # у каких товаров с тех пор пропала цена конкурента
+    signals: list = field(default_factory=list)  # сигналы рынка: кто из конкурентов двинул цены с прошлого прогона
 
 
 def rows_for_workbook(prep: Prepared, src: Sources, opt: Options) -> list[Row]:
@@ -1283,6 +1284,13 @@ def prepare(src: Sources, settings: Settings, opt: Options, price_files: list[Pr
             # с учётом и отсеянных фильтром «только с ценой»: пропавшая цена тоже убирает строку
             prep.losses_since, prep.losses = track_priced(priced_key(opt), kept + [r for r, _ in dropped_price])
         except Exception:  # noqa: BLE001 — самопроверка не должна мешать отчёту
+            pass
+        try:
+            from .insight import market_signals
+            from .pricehistory import priced_before, priced_key
+
+            prep.signals = market_signals(kept, priced_before(priced_key(opt)))
+        except Exception:  # noqa: BLE001
             pass
     return prep
 

@@ -59,7 +59,7 @@ def test_printed_1c_oem_catalog_fills_the_sister_column(tmp_path):
     row = next(r for r in prep.kept if r.article == "A6R173B")
     assert row.sister_price == 1500
     result = build_report(src, Settings.load(None), opt, tmp_path)
-    headers = [c.value for c in openpyxl.load_workbook(result.path)["Отчет"][3]]
+    headers = [c.value for c in openpyxl.load_workbook(result.path)["Товары"][4]]
     assert "AVANTECH" in headers
 
 
@@ -129,14 +129,13 @@ def test_shared_oem_puts_sister_price_after_competitors(tmp_path):
     assert row.sister_price == 900
     result = build_report(src, settings, opt, tmp_path)
     wb = openpyxl.load_workbook(result.path)
-    ws = wb["Отчет"]
-    headers = [c.value for c in ws[3]]
+    ws = wb["Товары"]
+    headers = [c.value for c in ws[4]]
     price_at = headers.index("AVANTECH")
-    assert headers.index("Сумма прибыли") < price_at
+    assert headers.index("Сумма прибыли, ₽") < price_at
     assert "AVANTECH арт." not in headers
-    assert ws.cell(4, price_at + 1).value == 900
-    assert "0F766E" in (ws.cell(3, price_at + 1).fill.fgColor.rgb or "")
-    assert HEAD_COLORS["sister"] == "FF0F766E"
+    assert ws.cell(5, price_at + 1).value == 900
+    assert "E2EFDA" in (ws.cell(4, price_at + 1).fill.fgColor.rgb or "")
 
 
 def test_filter_pair_and_no_column_for_other_brands(tmp_path):
@@ -174,8 +173,8 @@ def test_sister_column_is_next_to_cat_a_even_without_oem_file(tmp_path):
     assert prep.kept[0].sister_brand == "AVANTECH"
     assert prep.kept[0].sister_price is None
     result = build_report(src, settings, opt, tmp_path)
-    headers = [c.value for c in openpyxl.load_workbook(result.path)["Отчет"][3]]
-    assert headers.index("Сумма прибыли") < headers.index("AVANTECH")
+    headers = [c.value for c in openpyxl.load_workbook(result.path)["Товары"][4]]
+    assert headers.index("Сумма прибыли, ₽") < headers.index("AVANTECH")
     text = (tmp_path / "Разбор.txt").read_text(encoding="utf-8-sig")
     assert "До проценки" in text or "нет цен для анализа" in text
 
@@ -218,12 +217,12 @@ def test_oem_in_1c_folder_prices_the_neighbor_group(tmp_path):
     opt = Options(brand="ADVICS", group="Тормозные диски", sheet_filters=["overstock", "sale"])
     result = build_report(src, Settings.load(None), opt, tmp_path)
     wb = openpyxl.load_workbook(result.path)
-    wsht = wb["Отчет"]
-    assert [c.value for c in wsht[1] if c.value] == []
-    headers = [c.value for c in wsht[3]]
+    wsht = wb["Товары"]
+    assert wsht["A1"].value and not any("Показ" in str(c.value or "") for c in wsht[1])
+    headers = [c.value for c in wsht[4]]
     col = headers.index("AVANTECH") + 1
-    assert headers.index("Сумма прибыли") < headers.index("AVANTECH")
-    assert wsht.cell(4, col).value == 1500
+    assert headers.index("Сумма прибыли, ₽") < headers.index("AVANTECH")
+    assert wsht.cell(5, col).value == 1500
     assert (tmp_path / "Разбор.txt").is_file()
     import zipfile
     xml = zipfile.ZipFile(result.path).read("xl/worksheets/sheet1.xml").decode()

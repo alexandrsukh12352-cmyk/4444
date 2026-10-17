@@ -111,3 +111,29 @@ def test_compaction_keeps_fresh_dates():
     assert A.plan(shots, today) == ["01.09.2026", "20.09.2026"]
     assert A.plan(shots, today, keep_min=1) == ["01.09.2026", "20.09.2026", "29.09.2026"]
     assert A.plan(shots[:2], today) == []
+
+
+def test_market_signals_show_who_moved_prices():
+    from pricing.insight import market_signals
+
+    comp = NS(key="BREMBO", name="Brembo")
+    rows = [NS(code=str(i), prices={"BREMBO": 1060.0 if i < 4 else 1000.0}, competitors=[comp], sales=100) for i in range(10)]
+    prev = {"date": "2026-10-10", "items": {str(i): {"BREMBO": [1000.0, "Армтек"]} for i in range(10)}}
+    sig = market_signals(rows, prev)
+    assert len(sig) == 1 and sig[0]["side"] == "up" and sig[0]["n"] == 4 and sig[0]["of"] == 10
+    assert "Brembo поднял цены на 4 из 10" in sig[0]["text"] and "+6,0%" in sig[0]["text"] and "10.10" in sig[0]["text"]
+    # двинулись две позиции из десяти — не сигнал
+    for r in rows[2:4]:
+        r.prices = {"BREMBO": 1000.0}
+    assert market_signals(rows, prev) == []
+    assert market_signals(rows, None) == []
+
+
+def test_currency_move_is_a_signal(monkeypatch):
+    from pricing import server
+
+    monkeypatch.setattr(server.dynamics, "read_currency",
+                        lambda folder: {"rates": {"JPY": {"01.10.2026": 0.60, "16.10.2026": 0.63}, "USD": {"01.10.2026": 81.0, "16.10.2026": 81.5}}})
+    rows = [NS(purchase_currency="JPY"), NS(purchase_currency="JPY"), NS(purchase_currency="RUB")]
+    sig = server.currency_signals(Path("."), rows)
+    assert [s["comp"] for s in sig] == ["JPY"] and sig[0]["n"] == 2 and "+5,0%" in sig[0]["text"]

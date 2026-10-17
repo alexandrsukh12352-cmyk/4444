@@ -386,14 +386,14 @@ def test_report_layout(tmp_path, src, settings):
     opt = R.Options(**GROUP, cross_modes={"BREMBO|*": "yes"})
     result = R.build_report(src, settings, opt, tmp_path)
     wb = openpyxl.load_workbook(result.path)
-    assert wb.sheetnames[:3] == ["Итоги", "Отчет", "Цены"]
+    assert wb.sheetnames[:3] == ["Сводка", "Товары", "Цены конкурентов"]
     assert "Дашборд" not in wb.sheetnames
     assert "Параметры" not in wb.sheetnames
     assert {"ПСТ", "СБС", "Продажи"} <= set(wb.sheetnames)
-    assert wb["ПСТ"].sheet_state == "hidden" and wb["Отчет"].sheet_state == "visible"
-    ws = wb["Отчет"]
-    head = [c.value for c in ws[3]]
-    assert head[:4] == ["Код товара", "Наименование русс.", "Артикул", "Разновидность"]
+    assert wb["ПСТ"].sheet_state == "hidden" and wb["Товары"].sheet_state == "visible"
+    ws = wb["Товары"]
+    head = [c.value for c in ws[4]]
+    assert head[:3] == ["Код", "Артикул", "Разновидность"] and "Наименование" in head
     variety_at = head.index("Разновидность") + 1
     freeze_at = openpyxl.utils.column_index_from_string("".join(ch for ch in ws.freeze_panes if ch.isalpha()))
     assert variety_at < freeze_at
@@ -404,14 +404,14 @@ def test_report_layout(tmp_path, src, settings):
             assert i >= freeze_at, title
     assert "Brembo" not in head and "Основание" not in head
     assert "Курс" not in head and "ГЗ" not in head and "Скидка, %" not in head
-    assert head.index("Разновидность") < head.index("Продажи, шт") < head.index("Кат. А")
-    assert head.index("Сумма прибыли") < head.index("Brembo цена") < head.index("Откл Brembo")
-    rows = [{h: c.value for h, c in zip(head, r)} for r in ws.iter_rows(min_row=3)]
-    row = next(r for r in rows if r["Код товара"] == 130909)
-    assert isinstance(row["Brembo цена"], float)
-    assert str(row["Кат. А"]).startswith("=IF(")
-    assert "ПСТ" in str(row["МО"])
-    assert str(row["Откл Brembo"]).startswith("=IF(")
+    assert head.index("Разновидность") < head.index("Продажи, шт") < head.index("Кат. А, ₽")
+    assert head.index("Сумма прибыли, ₽") < head.index("Brembo, ₽") < head.index("Откл.")
+    rows = [{h: c.value for h, c in zip(head, r)} for r in ws.iter_rows(min_row=5)]
+    row = next(r for r in rows if r["Код"] == 130909)
+    assert isinstance(row["Brembo, ₽"], float)
+    assert str(row["Кат. А, ₽"]).startswith("=IF(")
+    assert "ПСТ" in str(row["МО, ₽"])
+    assert str(row["Откл."]).startswith("=IF(")
     assert any(c.value == "Код товара" for line in wb["ПСТ"].iter_rows(max_row=4) for c in line)
 
 
@@ -422,9 +422,9 @@ def test_subgroup_sheets(tmp_path, src, settings):
     built = R.build_report(split, settings, R.Options(**GROUP, subgroup_mode="sheets"), tmp_path / "a")
     assert "Спортивные тормозные диски" not in built.sheets
     assert built.rows == len(src.pst) - half
-    assert "Отчет" in built.sheets and "Дашборд" not in built.sheets
+    assert "Товары" in built.sheets and "Дашборд" not in built.sheets
     single = R.build_report(split, settings, R.Options(**GROUP, subgroup_mode="single"), tmp_path / "b").sheets
-    assert "Отчет" in single and "Спортивные тормозные диски" not in single
+    assert "Товары" in single and "Спортивные тормозные диски" not in single
 
 
 def test_settings_roundtrip(tmp_path):

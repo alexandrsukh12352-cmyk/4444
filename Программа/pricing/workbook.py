@@ -53,9 +53,11 @@ HEAD_COLORS = {
 }
 # Без длинного тире и кириллицы: Excel 2016 из‑за такого формата чисел выбрасывает весь styles.xml.
 MONEY = '#,##0.00'
+RUB = '#,##0'
 INT = '#,##0'
 PCT = '0.0%;-0.0%;0.0%'
 PCT_SIGNED = '+0.0%;-0.0%;0.0%'
+CHANGE = '+0.0%;-0.0%;""'  # цену не меняем — пусто, а не 0,0%
 COEF = '0.000'
 INK = Font(name=style.FONT, color=style.INK)
 INPUT = Font(name=style.FONT, color=argb("1F4E9E"))  # синий — исходное значение, можно править
@@ -70,10 +72,12 @@ ROW_BORDER = Border(bottom=Side(style="thin", color=argb("C9D1D9")))
 # Как пишет сам Excel: в условном формате цвет лежит в bgColor, без patternType.
 GREEN = (PatternFill(bgColor=argb("C6EFCE")), Font(color=argb("006100")))
 RED = (PatternFill(bgColor=argb("FFC7CE")), Font(color=argb("9C0006")))
-# Строка 1 пустая. Шапка таблицы на строке 3.
-TITLE_ROW = 2
-HEADER_ROW = 3
-FIRST = 4  # первая строка данных на листах отчёта
+# Строка 1 — название, 2 — итоги по фильтру, 3 — надписи блоков, 4 — шапка.
+TITLE_ROW = 1
+TOTAL_ROW = 2
+BAND_ROW = 3
+HEADER_ROW = 4
+FIRST = 5  # первая строка данных на листе «Товары»
 
 
 def code_value(code: str):
@@ -551,6 +555,46 @@ class Column:
     rule: str = ""  # dev | band | change | vr | bar
     tone: int | None = None  # чередование заливки у пары «цена / отклонение» конкурента
     edge: bool = False  # левая граница блока конкурента
+    band: str = ""  # надпись над шапкой: ТОВАР, ПРОДАЖИ, НАША ЦЕНА, КОНКУРЕНТЫ, РЕШЕНИЕ
+
+
+def short_reason(reason: str) -> str:
+    """Причина в две-три слова для столбца «Причина»; полный текст — в свёрнутом «Подробно»."""
+    text = (reason or "").strip()
+    head = text.split(";")[0].strip()
+    tail = text[len(head):]
+    m = re.match(r"цену меняли (\d{2}\.\d{2})\.\d{4}.*не трогаем до (\d{2}\.\d{2})", text)
+    if m:
+        return f"меняли {m.group(1)}, ждём до {m.group(2)}"
+    if head.startswith("нет продаж и нет остатка"):
+        out = "нет продаж и остатка"
+    elif head.startswith("нет продаж, а мы не дороже"):
+        out = "нет продаж, цена не мешает"
+    elif head.startswith("нет продаж, есть остаток"):
+        who = head.rsplit("к цели", 1)[-1].strip()
+        out = f"лежит, дороже {who} — снижаем".replace("  ", " ") if who else "лежит, дороже рынка — снижаем"
+    elif head.startswith("нет продаж"):
+        out = "нет продаж"
+    elif head.startswith("в пределах позиционирования"):
+        m = re.search(r"\(([^)]*)\)", head)
+        out = f"у цели ({m.group(1)})" if m else "у цели"
+    elif head.startswith("топ продаж, категория A"):
+        out = "топ — не снижаем"
+    elif head.startswith("снижение ограничено окупаемостью"):
+        out = "снижать невыгодно"
+    elif head.startswith("ВР ниже") and "поднимаем" in head:
+        out = "мин. ВР — поднимаем"
+    elif head.startswith("к цели"):
+        out = "к " + head[len("к цели"):].split(",")[0].strip()
+        if "ограничено" in head or "окупаемост" in tail:
+            out += ", шаг ограничен"
+    else:
+        out = head
+    if "не ниже ВР" in tail:
+        out += ", мин. ВР"
+    elif "вопрос к закупке" in tail:
+        out += ", ВР низкая — к закупке"
+    return out
 
 
 def both(*cells: str) -> str:
@@ -586,11 +630,6 @@ def report_columns(rows: list[Row], refs: Refs, opt: Options, period: str,
             c.outline = True
         return columns
 
-    identity = [
-        Column("Код товара", "id", 11, lambda r, *_: code_value(r.code), key="code"),
-        Column("Наименование русс.", "id", 34, lambda r, n, L: linked("pst", "name", n, L, r.name) if r.pst and r.pst.name else r.name, key="name"),
-        Column("Артикул", "id", 14, lambda r, n, L: linked("pst", "article", n, L, r.article) if r.pst and r.pst.article else r.article, key="article"),
-    ]
     variety = Column("Разновидность", "info", 42, lambda r, n, L: linked("pst", "variety", n, L, r.variety) if r.pst and r.pst.variety else r.variety, key="variety")
     def pst_text(r, field: str):
         item = r.pst
@@ -665,50 +704,6 @@ def report_columns(rows: list[Row], refs: Refs, opt: Options, period: str,
             return linked("pst", "subgroup", n, L, r.subgroup)
         return r.subgroup
 
-    folded = [
-        Column("Группа заказа", "info", 20, lambda r, n, L: linked("pst", "order_group", n, L, r.order_group) if pst_text(r, "order_group") else r.order_group),
-        Column("Категория NEW", "info", 22, lambda r, n, L: linked("pst", "category", n, L, r.category) if pst_text(r, "category") else r.category),
-        Column("Группа NEW", "info", 16, lambda r, n, L: linked("pst", "group", n, L, r.group) if pst_text(r, "group") else r.group),
-        Column("Подгруппа NEW", "info", 24, subgroup_value, key="subgroup"),
-        Column("Закупка, валюта", "buy", 9, lambda r, n, L: linked("pst", "purchase_currency", n, L, r.purchase_currency) if pst_text(r, "purchase_currency") else r.purchase_currency, key="cur"),
-        Column("Закупка, цена в валюте", "buy", 12, lambda r, n, L: linked("pst", "purchase_price", n, L, r.purchase_price) if r.pst and r.pst.purchase_price is not None else r.purchase_price, MONEY, key="buy_cur", input=is_input),
-        Column("Закупочная цена", "calc", 13, buy_rub, MONEY, key="buy"),
-        Column("МО", "calc", 12, mo_value, MONEY, key="mo", input=is_input),
-        Column("Марки авто", "info", 28, lambda r, *_: r.car.label if r.car else ""),
-        Column("Автопарк", "car", 16, lambda r, *_: r.car.fleet if r.car else ""),
-        Column("Ценовой сегмент", "car", 12, lambda r, *_: r.car.segment if r.car else "", key="segment"),
-    ]
-    if any(r.assortment for r in rows):
-        folded.append(Column("Тип ассорт.", "info", 8, lambda r, n, L: linked("pst", "assortment", n, L, r.assortment)
-                             if took_own(opt.source("assortment"), r.pst.assortment if r.pst else "", r.acp.assortment if r.acp else "")
-                             else r.assortment))
-    if any(r.overstock for r in rows):
-        folded.append(Column("Оверсток", "info", 14, lambda r, n, L: linked("pst", "overstock", n, L, r.overstock) if pst_text(r, "overstock") else r.overstock))
-    if any(r.discontinued for r in rows) and opt.filter("sale") != "exclude":
-        def discontinued_value(r, n, L):
-            formula = pull("pst", "discontinued", n, L) if r.pst else None
-            if not formula:
-                return "да" if r.discontinued else ""
-            return f'=IF({formula}=1,"да","")'
-        folded.append(Column("Вывод из ассорт.", "info", 9, discontinued_value))
-    folded.append(Column("Продажи, руб.", "calc", 15, sales_rub_value, MONEY, key="sales", input=is_input))
-    # Разновидность до свёрнутых столбцов и внутри закрепления. Иначе «+» стоит на ней,
-    # и Excel 2016 при развороте группы внутри закреплённой области зависает.
-    cols = identity + [variety] + fold(folded) + [
-        Column(sales_title, "calc", 11, sales_qty_value, INT, key="sales_qty", input=is_input, rule="bar"),
-        Column("Остаток", "calc", 9, stock_value, INT, key="stock", input=is_input),
-        Column("ABC", "calc", 7, abc_value, key="abc"),
-        Column("СБС", "calc", 12, sbs_value, MONEY, key="sbs", input=is_input),
-    ]
-    cols.append(Column("СБС план", "calc", 12, sbs_plan, MONEY, key="sbs_plan"))
-    if any(r.sales3 is not None for r in rows):
-        # Продажи за последние месяцы — по ним правило «нет продаж — не поднимаем».
-        qty3 = any(r.sales3_qty for r in rows)
-        at = next(i for i, c in enumerate(cols) if c.key == "sales_qty") + 1
-        cols.insert(at, Column("Продажи 3 мес, шт" if qty3 else "Продажи 3 мес, руб.", "calc", 11,
-                               (lambda r, *_: r.sales3_qty) if qty3 else (lambda r, *_: r.sales3),
-                               INT if qty3 else MONEY, key="sales3"))
-
     def cat_a(r, n, L):
         if r.cat_a_calc and r.discount is not None and r.mo is not None and "mo" in L:
             return f'=IF(ISNUMBER({L["mo"]}{n}),{L["mo"]}{n}*(1-{excel_num(r.discount)}/100),"")'
@@ -745,68 +740,144 @@ def report_columns(rows: list[Row], refs: Refs, opt: Options, period: str,
             return f'=IF({use},"")'
         return value
 
-    cols += [
-        Column("Кат. А", "calc", 12, cat_a, MONEY, key="cat_a", input=lambda r: not r.cat_a_calc),
-        Column("ВР 1", "calc", 8, margin("cat_a"), PCT, key="vr", rule="vr"),
-        Column("Сумма потенциала" if opt.money_base == "potential" else "Сумма продажи", "calc", 15, sales_sum("cat_a"), MONEY, key="sum_sale"),
-        Column("Прибыль на потенциале" if opt.money_base == "potential" else "Сумма прибыли", "calc", 15, lambda r, n, L: f'=IF({both(L["sum_sale"] + str(n), L["vr"] + str(n))},'
-               f'{L["sum_sale"]}{n}*{L["vr"]}{n},"")', MONEY, key="sum_profit"),
-    ]
+    def value_of(kind: str, field: str, plain_attr: str):
+        return lambda r, n, L: linked(kind, field, n, L, getattr(r, plain_attr)) if pst_text(r, field) else getattr(r, plain_attr)
 
+    # ---- ТОВАР: на виду код, артикул, разновидность и ABC; остальное свёрнуто под «+»
+    item_fold = [
+        Column("Наименование", "id", 34, lambda r, n, L: linked("pst", "name", n, L, r.name) if r.pst and r.pst.name else r.name, key="name"),
+        Column("Группа заказа", "info", 20, value_of("pst", "order_group", "order_group")),
+        Column("Категория NEW", "info", 22, value_of("pst", "category", "category")),
+        Column("Группа NEW", "info", 16, value_of("pst", "group", "group")),
+        Column("Подгруппа NEW", "info", 24, subgroup_value, key="subgroup"),
+    ]
+    if any(r.assortment for r in rows):
+        item_fold.append(Column("Тип ассорт.", "info", 8, lambda r, n, L: linked("pst", "assortment", n, L, r.assortment)
+                                if took_own(opt.source("assortment"), r.pst.assortment if r.pst else "", r.acp.assortment if r.acp else "")
+                                else r.assortment))
+    if any(r.overstock for r in rows):
+        item_fold.append(Column("Оверсток", "info", 14, value_of("pst", "overstock", "overstock")))
+    if any(r.discontinued for r in rows) and opt.filter("sale") != "exclude":
+        def discontinued_value(r, n, L):
+            formula = pull("pst", "discontinued", n, L) if r.pst else None
+            if not formula:
+                return "да" if r.discontinued else ""
+            return f'=IF({formula}=1,"да","")'
+        item_fold.append(Column("Вывод из ассорт.", "info", 9, discontinued_value))
+    item_fold += [
+        Column("Марки авто", "info", 28, lambda r, *_: r.car.label if r.car else ""),
+        Column("Автопарк", "car", 16, lambda r, *_: r.car.fleet if r.car else ""),
+        Column("Ценовой сегмент", "car", 12, lambda r, *_: r.car.segment if r.car else "", key="segment"),
+    ]
+    # Разновидность до свёрнутых столбцов и внутри закрепления. Иначе «+» стоит на ней,
+    # и Excel 2016 при развороте группы внутри закреплённой области зависает.
+    cols = [
+        Column("Код", "id", 10, lambda r, *_: code_value(r.code), key="code"),
+        Column("Артикул", "id", 14, lambda r, n, L: linked("pst", "article", n, L, r.article) if r.pst and r.pst.article else r.article, key="article"),
+        variety,
+    ] + fold(item_fold) + [Column("ABC", "calc", 6, abc_value, key="abc")]
+    for c in cols:
+        c.band = "ТОВАР"
+
+    # ---- ПРОДАЖИ
+    sales = [
+        Column(sales_title, "calc", 10, sales_qty_value, INT, key="sales_qty", input=is_input, rule="bar"),
+    ]
+    if any(r.sales3 is not None for r in rows):
+        # Продажи за последние месяцы — по ним правило «нет продаж — не поднимаем».
+        qty3 = any(r.sales3_qty for r in rows)
+        sales.append(Column("Продажи 3 мес, шт" if qty3 else "Продажи 3 мес, ₽", "calc", 10,
+                            (lambda r, *_: r.sales3_qty) if qty3 else (lambda r, *_: r.sales3), INT, key="sales3"))
+    sales += [
+        Column("Продажи, ₽", "calc", 13, sales_rub_value, RUB, key="sales", input=is_input),
+        Column("Остаток, шт", "calc", 9, stock_value, INT, key="stock", input=is_input),
+    ]
+    if any(r.in_transit is not None for r in rows):
+        sales += [
+            Column("В пути, шт", "calc", 9, lambda r, *_: r.in_transit, INT, key="transit", input=is_input),
+            Column("Потенциал, шт", "calc", 11,
+                   lambda r, n, L: f'=IF(COUNT({L["stock"]}{n},{L["transit"]}{n})=0,"",SUM({L["stock"]}{n},{L["transit"]}{n}))',
+                   INT, key="potential"),
+        ]
+    for c in sales:
+        c.band = "ПРОДАЖИ"
+
+    # ---- НАША ЦЕНА: Кат. А и ВР на виду, из чего они складываются — под «+»
+    price_fold = [
+        Column("МО, ₽", "calc", 11, mo_value, RUB, key="mo", input=is_input),
+        Column("Закупка, валюта", "buy", 9, value_of("pst", "purchase_currency", "purchase_currency"), key="cur"),
+        Column("Закупка в валюте", "buy", 11, lambda r, n, L: linked("pst", "purchase_price", n, L, r.purchase_price) if r.pst and r.pst.purchase_price is not None else r.purchase_price, MONEY, key="buy_cur", input=is_input),
+        Column("Закупка, ₽", "calc", 11, buy_rub, RUB, key="buy"),
+        Column("СБС, ₽", "calc", 11, sbs_value, RUB, key="sbs", input=is_input),
+        Column("СБС план, ₽", "calc", 11, sbs_plan, RUB, key="sbs_plan"),
+        Column("Сумма потенциала, ₽" if opt.money_base == "potential" else "Сумма продажи, ₽", "calc", 14, sales_sum("cat_a"), RUB, key="sum_sale"),
+        Column("Прибыль на потенциале, ₽" if opt.money_base == "potential" else "Сумма прибыли, ₽", "calc", 14,
+               lambda r, n, L: f'=IF({both(L["sum_sale"] + str(n), L["vr"] + str(n))},{L["sum_sale"]}{n}*{L["vr"]}{n},"")', RUB, key="sum_profit"),
+    ]
+    ours = [
+        Column("Кат. А, ₽", "calc", 11, cat_a, RUB, key="cat_a", input=lambda r: not r.cat_a_calc),
+        Column("ВР", "calc", 7, margin("cat_a"), PCT, key="vr", rule="vr"),
+    ] + fold(price_fold)
+    for c in ours:
+        c.band = "НАША ЦЕНА"
+    cols += sales + ours
+
+    # ---- КОНКУРЕНТЫ: пара «цена / откл.» на своей заливке, через одного
+    market = []
     for i, c in enumerate(comps):
         tone = i % 2
-        cols.append(Column(f"{c.name} цена", "comp", 12, lambda r, *_ , comp=c: r.prices.get(comp.key), MONEY,
-                           key=f"price:{c.key}", tone=tone, edge=True))
-        cols.append(Column(f"Откл {c.name}", "comp", 8, lambda r, n, L, k=c.key: f'=IF({both(L["price:" + k] + str(n), L["cat_a"] + str(n))},'
-                           f'1-{L["cat_a"]}{n}/{L["price:" + k]}{n},"")', PCT, key=f"dev:{c.key}", rule="dev", tone=tone))
-
+        market.append(Column(f"{c.name}, ₽", "comp", 11, lambda r, *_ , comp=c: r.prices.get(comp.key), RUB,
+                             key=f"price:{c.key}", tone=tone))
+        market.append(Column("Откл.", "comp", 7, lambda r, n, L, k=c.key: f'=IF({both(L["price:" + k] + str(n), L["cat_a"] + str(n))},'
+                             f'1-{L["cat_a"]}{n}/{L["price:" + k]}{n},"")', PCT_SIGNED, key=f"dev:{c.key}", rule="dev", tone=tone))
     sister = next((getattr(r, "sister_brand", "") for r in rows if getattr(r, "sister_brand", "")), "")
     if sister:
         from .sisters import sister_title
-        cols.append(Column(sister_title(sister), "sister", 16, lambda r, *_: r.sister_price, MONEY, key="sister"))
-
+        market.append(Column(sister_title(sister), "sister", 14, lambda r, *_: r.sister_price, RUB, key="sister"))
     if any(r.target for r in rows):
         # Цель — снимок на момент формирования: цена конкурента × (1 + % позиционирования).
-        cols += [
-            Column("Цель", "pos", 12, lambda r, *_: round(r.target, 2) if r.target else None, MONEY, key="target", edge=True),
-            Column("По кому цель", "pos", 12, lambda r, *_: r.target_by if r.target else "", key="target_by"),
-            Column("Откл. от цели", "pos", 9, lambda r, n, L: f'=IF({both(L["target"] + str(n), L["cat_a"] + str(n))},'
-                   f'1-{L["cat_a"]}{n}/{L["target"]}{n},"")', PCT, key="gap", rule="band"),
-        ]
+        market += [
+            Column("Цель, ₽", "pos", 11, lambda r, *_: round(r.target, 2) if r.target else None, RUB, key="target"),
+            Column("Откл. от цели", "pos", 8, lambda r, n, L: f'=IF({both(L["target"] + str(n), L["cat_a"] + str(n))},'
+                   f'1-{L["cat_a"]}{n}/{L["target"]}{n},"")', PCT_SIGNED, key="gap", rule="band"),
+        ] + fold([Column("По кому цель", "pos", 12, lambda r, *_: r.target_by if r.target else "", key="target_by")])
+    for c in market:
+        c.band = "КОНКУРЕНТЫ"
+    cols += market
 
-    if any(getattr(r, "last_change", None) for r in rows):
-        from .pricehistory import change_text
-
-        cols.append(Column("Цену меняли", "info", 26, lambda r, *_: change_text(getattr(r, "last_change", None)), key="changed"))
-
+    # ---- РЕШЕНИЕ
     if ro.enabled:
         def rec_value(r, *_):
             return r.rec.price if r.rec else None
 
-        cols += [
-            Column("Рек. кат. А", "rec", 12, rec_value, MONEY, key="rec", input=is_input),
-            Column("Изм. %", "rec", 8, lambda r, n, L: f'=IF({both(L["rec"] + str(n), L["cat_a"] + str(n))},'
-                   f'{L["rec"]}{n}/{L["cat_a"]}{n}-1,"")', PCT_SIGNED, key="change", rule="change"),
-            Column("Почему", "rec", 46, lambda r, *_: r.rec.reason if r.rec else "", key="reason"),
+        decide = [
+            Column("Новая цена, ₽", "rec", 11, rec_value, RUB, key="rec", input=is_input),
+            Column("Изм.", "rec", 7, lambda r, n, L: f'=IF({both(L["rec"] + str(n), L["cat_a"] + str(n))},'
+                   f'{L["rec"]}{n}/{L["cat_a"]}{n}-1,"")', CHANGE, key="change", rule="change"),
+            Column("Причина", "rec", 30, lambda r, *_: short_reason(r.rec.reason) if r.rec else "", key="reason"),
         ]
-        extra = []
-        extra.append(Column("Рек. МО", "rec", 12, lambda r, n, L: f'=IF(ISNUMBER({L["rec"]}{n}),{L["rec"]}{n}/(1-{excel_num(r.discount)}/100),"")'
-                            if r.discount is not None else None, MONEY, key="rec_mo"))
-        extra.append(Column("ВР рек.", "rec", 8, margin("rec"), PCT, key="vr_rec", rule="vr"))
+        extra = [Column("Подробно", "rec", 60, lambda r, *_: r.rec.reason if r.rec else "", key="reason_full")]
+        if any(getattr(r, "last_change", None) for r in rows):
+            from .pricehistory import change_text
+
+            extra.append(Column("Цену меняли", "info", 26, lambda r, *_: change_text(getattr(r, "last_change", None)), key="changed"))
+        extra.append(Column("Новое МО, ₽", "rec", 11, lambda r, n, L: f'=IF(ISNUMBER({L["rec"]}{n}),{L["rec"]}{n}/(1-{excel_num(r.discount)}/100),"")'
+                            if r.discount is not None else None, RUB, key="rec_mo"))
+        extra.append(Column("ВР после", "rec", 7, margin("rec"), PCT, key="vr_rec", rule="vr"))
         extra += [
-            Column("Сумма потенциала рек." if opt.money_base == "potential" else "Сумма продажи рек.", "rec", 15, sales_sum("rec"), MONEY, key="sum_sale_rec"),
-            Column("Прибыль на потенциале рек." if opt.money_base == "potential" else "Сумма прибыли рек.", "rec", 15, lambda r, n, L: f'=IF({both(L["sum_sale_rec"] + str(n), L["vr_rec"] + str(n))},'
-                   f'{L["sum_sale_rec"]}{n}*{L["vr_rec"]}{n},"")', MONEY, key="sum_profit_rec"),
+            Column("Сумма потенциала после, ₽" if opt.money_base == "potential" else "Сумма продажи после, ₽", "rec", 14, sales_sum("rec"), RUB, key="sum_sale_rec"),
+            Column("Прибыль на потенциале после, ₽" if opt.money_base == "potential" else "Сумма прибыли после, ₽", "rec", 14,
+                   lambda r, n, L: f'=IF({both(L["sum_sale_rec"] + str(n), L["vr_rec"] + str(n))},{L["sum_sale_rec"]}{n}*{L["vr_rec"]}{n},"")',
+                   RUB, key="sum_profit_rec"),
         ]
-        cols += fold(extra)
-    if any(r.in_transit is not None for r in rows):
-        stock_at = next((i for i, c in enumerate(cols) if c.key == "stock"), None)
-        if stock_at is not None:
-            cols.insert(stock_at + 1, Column("В пути, шт", "calc", 11, lambda r, *_: r.in_transit, INT, key="transit", input=is_input))
-            cols.insert(stock_at + 2, Column(
-                "Потенциал, шт", "calc", 14,
-                lambda r, n, L: f'=IF(COUNT({L["stock"]}{n},{L["transit"]}{n})=0,"",SUM({L["stock"]}{n},{L["transit"]}{n}))',
-                INT, key="potential"))
+        decide += fold(extra)
+        for c in decide:
+            c.band = "РЕШЕНИЕ"
+        cols += decide
+    elif any(getattr(r, "last_change", None) for r in rows):
+        from .pricehistory import change_text
+
+        cols.append(Column("Цену меняли", "info", 26, lambda r, *_: change_text(getattr(r, "last_change", None)), key="changed", band="РЕШЕНИЕ"))
     return cols
 
 
@@ -828,83 +899,115 @@ class SheetInfo:
 
 def write_report_sheet(ws, title: str, rows: list[Row], refs: Refs, opt: Options, period: str,
                        src: Sources | None = None, live: Live | None = None, settings: Settings | None = None) -> SheetInfo:
+    """Лист «Товары»: название, строка итогов по фильтру, надписи блоков, шапка, товары.
+
+    Оформление как у таблицы, сделанной руками: серая шапка, тонкие серые линии, заливкой выделены
+    только наша цена, новая цена и конкуренты (через одного), отклонения — цветом текста.
+    """
     cols = report_columns(rows, refs, opt, period, src, live, settings)
     L = {c.key: get_column_letter(i) for i, c in enumerate(cols, 1) if c.key}
     last = max(FIRST, FIRST + len(rows) - 1)
     ws.sheet_view.showGridLines = False
     ws.sheet_view.zoomScale = 90
 
+    ink = Font(name=style.FONT, color=style.INK)
+    bold = Font(name=style.FONT, bold=True, color=style.INK)
     ws.cell(TITLE_ROW, 1, title).font = Font(name=style.FONT, size=14, bold=True, color=style.INK)
-    first_open = next((i for i, c in enumerate(cols, 1) if not c.outline), 1)
-    if first_open != 1:
-        ws.cell(TITLE_ROW, first_open, title).font = Font(name=style.FONT, size=14, bold=True, color=style.INK)
-    ws.row_dimensions[TITLE_ROW].height = 26
-    totals = Font(name=style.FONT, bold=True, color=style.INK)
-    # 109, а не 9: итог не считает строки, которые фильтр над таблицей скрыл.
+    ws.row_dimensions[TITLE_ROW].height = 24
+
+    # ---- итоги по тому, что видно после фильтра. 109 — без строк, которые фильтр скрыл
     tot = lambda key: f"SUBTOTAL(109,{L[key]}{FIRST}:{L[key]}{last})"  # noqa: E731
-    t = TITLE_ROW
+    t = TOTAL_ROW
+    total_fill = PatternFill("solid", fgColor=style.XL_TOTAL)
+    for i in range(1, len(cols) + 1):
+        c = ws.cell(t, i)
+        c.fill, c.border = total_fill, style.XL_CELL
+    label = ws.cell(t, 1, f'="Итого (товаров: "&SUBTOTAL(103,{L["code"]}{FIRST}:{L["code"]}{last})&")"')
+    label.font = bold
     total_cells = [
         ("vr", f'=IFERROR({L["sum_profit"]}{t}/{L["sum_sale"]}{t},"")', PCT),
-        ("sum_sale", "=" + tot("sum_sale"), MONEY),
-        ("sum_profit", "=" + tot("sum_profit"), MONEY),
+        ("sum_sale", "=" + tot("sum_sale"), RUB),
+        ("sum_profit", "=" + tot("sum_profit"), RUB),
         ("sales_qty", "=" + tot("sales_qty"), INT),
+        ("stock", "=" + tot("stock"), INT),
     ]
-    if "sales" in L:
-        total_cells.append(("sales", "=" + tot("sales"), INT))
+    for key in ("sales", "sales3", "transit", "potential"):
+        if key in L:
+            total_cells.append((key, "=" + tot(key), RUB if key == "sales" else INT))
     if "rec" in L:
         total_cells += [
             ("vr_rec", f'=IFERROR({L["sum_profit_rec"]}{t}/{L["sum_sale_rec"]}{t},"")', PCT),
-            ("sum_sale_rec", "=" + tot("sum_sale_rec"), MONEY),
-            ("sum_profit_rec", "=" + tot("sum_profit_rec"), MONEY),
+            ("sum_sale_rec", "=" + tot("sum_sale_rec"), RUB),
+            ("sum_profit_rec", "=" + tot("sum_profit_rec"), RUB),
             ("change", f'=IFERROR({L["sum_sale_rec"]}{t}/{L["sum_sale"]}{t}-1,"")', PCT_SIGNED),
         ]
     for key, formula, fmt in total_cells:
-        c = ws[f"{L[key]}{TITLE_ROW}"]
-        c.value, c.number_format, c.font = formula, fmt, totals
-        c.fill = PatternFill("solid", fgColor=style.ACCENT_SOFT)
+        c = ws[f"{L[key]}{t}"]
+        c.value, c.number_format, c.font = formula, fmt, bold
+
+    # ---- надписи блоков над шапкой: «по центру выделения», без объединения ячеек
+    band_font = Font(name=style.FONT, bold=True, size=9, color=style.XL_BAND)
+    band_line = Border(bottom=Side(style="medium", color=argb("7F7F7F")))
+    start = 0
+    for i in range(1, len(cols) + 2):
+        if i <= len(cols) and cols[i - 1].band == cols[start].band:
+            continue
+        band = cols[start].band
+        if band:
+            for j in range(start + 1, i):
+                c = ws.cell(BAND_ROW, j)
+                c.alignment = Alignment(horizontal="centerContinuous")
+                c.border = band_line
+                c.font = band_font
+            ws.cell(BAND_ROW, start + 1, band)
+        start = i - 1
+    ws.row_dimensions[BAND_ROW].height = 15
+
+    head_fill = PatternFill("solid", fgColor=style.XL_HEAD)
     for i, c in enumerate(cols, 1):
         cell = ws.cell(HEADER_ROW, i, c.title)
-        cell.font = Font(name=style.FONT, bold=True, color=argb("FFFFFF"))
-        cell.fill = PatternFill("solid", fgColor=HEAD_COLORS[c.kind])
+        cell.font = bold
+        cell.fill = head_fill
         cell.alignment = Alignment(wrap_text=True, vertical="center", horizontal="center")
-        cell.border = Border(left=Side(style="thin", color=argb("FFFFFF")))
+        cell.border = style.XL_HEAD_BORDER
         dim = ws.column_dimensions[get_column_letter(i)]
         dim.width = c.width
         if c.outline:
             dim.outlineLevel = 1
             dim.hidden = True
-        if c.edge:
-            cell.border = Border(left=Side(style="medium", color=argb("C4A574")))
-    ws.row_dimensions[HEADER_ROW].height = 44
+    ws.row_dimensions[HEADER_ROW].height = 32
 
+    fills = {
+        "cat_a": PatternFill("solid", fgColor=style.XL_CAT_A),
+        "rec": PatternFill("solid", fgColor=style.XL_NEW),
+        "sister": PatternFill("solid", fgColor=style.XL_SISTER),
+    }
+    tones = [PatternFill("solid", fgColor=x) for x in style.XL_COMP]
+    for key, fill in fills.items():
+        if key in L:
+            ws[f"{L[key]}{HEADER_ROW}"].fill = fill
+    for i, c in enumerate(cols, 1):
+        if c.tone is not None:
+            ws.cell(HEADER_ROW, i).fill = tones[c.tone]
+    small = Font(name=style.FONT, color=style.XL_MUTED, size=9)
     for n, r in enumerate(rows, FIRST):
         for i, c in enumerate(cols, 1):
             value = c.value(r, n, L)
             cell = ws.cell(n, i, value if value != "" else None)
             is_formula = isinstance(value, str) and value.startswith("=")
             inp = c.input(r) if callable(c.input) else c.input
-            cell.font = INPUT if inp and not is_formula and value not in (None, "") else INK
-            cell.border = ROW_BORDER
+            cell.font = INPUT if inp and not is_formula and value not in (None, "") else ink
+            cell.border = style.XL_CELL
             if c.fmt:
                 cell.number_format = c.fmt
-            if c.key == "cat_a":
-                cell.fill = CAT_A_FILL
-            elif c.key == "sister":
-                cell.fill = SISTER_FILL
-            elif c.key == "rec":
-                cell.fill = REC_FILL
+            if c.key in fills:
+                cell.fill = fills[c.key]
             elif c.tone is not None:
-                cell.fill = COMP_TONES[c.tone]
-            if c.edge:
-                cell.border = COMP_EDGE
-            if c.key.startswith("cross:"):
-                picks = r.picks.get(c.key[6:], [])
-                if picks and all(p.yes is False for p in picks):
-                    cell.font = NO_FONT
-                elif picks and all(p.yes is None for p in picks):
-                    cell.font = ACP_FONT
-            elif c.key == "reason":
-                cell.font = Font(name=style.FONT, color=style.MUTED, size=9)
+                cell.fill = tones[c.tone]
+            if c.key == "article":
+                cell.font = Font(name=style.FONT, bold=True, color=style.INK)
+            elif c.key == "reason_full":
+                cell.font = small
 
     if rows:
         add_rules(ws, cols, L, last, opt)
@@ -930,13 +1033,17 @@ def write_report_sheet(ws, title: str, rows: list[Row], refs: Refs, opt: Options
     last_col = get_column_letter(len(cols))
     ws.auto_filter.ref = f"A{HEADER_ROW}:{last_col}{last}"
     ws.sheet_properties.outlinePr.summaryRight = True
+    style.print_wide(ws, f"{BAND_ROW}:{HEADER_ROW}")
     return SheetInfo(ws.title, L, FIRST, last, rows)
 
 
 def add_rules(ws, cols: list[Column], L: dict, last: int, opt: Options) -> None:
+    """Условное форматирование — только цвет текста: заливка в отчёте у столбцов, а не у отклонений."""
     ro = opt.recs
     tol = ro.tolerance / 100
-    above, below = (GREEN, RED) if opt.green_when == "above" else (RED, GREEN)
+    green = Font(color=style.XL_GREEN)
+    red = Font(color=style.XL_RED)
+    above, below = (green, red) if opt.green_when == "above" else (red, green)
     for c in cols:
         col = L.get(c.key)
         if not col:
@@ -945,16 +1052,16 @@ def add_rules(ws, cols: list[Column], L: dict, last: int, opt: Options) -> None:
         x = f"{col}{FIRST}"
         if c.rule == "dev":
             # Откл = 1 − наша / их: < 0 — мы дороже конкурента
-            ws.conditional_formatting.add(rng, FormulaRule(formula=[f"AND(ISNUMBER({x}),{x}<0)"], fill=above[0], font=above[1]))
-            ws.conditional_formatting.add(rng, FormulaRule(formula=[f"AND(ISNUMBER({x}),{x}>0)"], fill=below[0], font=below[1]))
+            ws.conditional_formatting.add(rng, FormulaRule(formula=[f"AND(ISNUMBER({x}),{x}<0)"], font=above))
+            ws.conditional_formatting.add(rng, FormulaRule(formula=[f"AND(ISNUMBER({x}),{x}>0)"], font=below))
         elif c.rule == "band":
-            ws.conditional_formatting.add(rng, FormulaRule(formula=[f"AND(ISNUMBER({x}),{x}<-{tol})"], fill=above[0], font=above[1]))
-            ws.conditional_formatting.add(rng, FormulaRule(formula=[f"AND(ISNUMBER({x}),{x}>{tol})"], fill=below[0], font=below[1]))
+            ws.conditional_formatting.add(rng, FormulaRule(formula=[f"AND(ISNUMBER({x}),{x}<-{tol})"], font=above))
+            ws.conditional_formatting.add(rng, FormulaRule(formula=[f"AND(ISNUMBER({x}),{x}>{tol})"], font=below))
         elif c.rule == "change":
-            ws.conditional_formatting.add(rng, FormulaRule(formula=[f"AND(ISNUMBER({x}),{x}>0.0005)"], font=Font(color=argb("1D5FA8"), bold=True)))
-            ws.conditional_formatting.add(rng, FormulaRule(formula=[f"AND(ISNUMBER({x}),{x}<-0.0005)"], font=Font(color=argb("B45309"), bold=True)))
+            ws.conditional_formatting.add(rng, FormulaRule(formula=[f"AND(ISNUMBER({x}),{x}>0.0005)"], font=Font(bold=True)))
+            ws.conditional_formatting.add(rng, FormulaRule(formula=[f"AND(ISNUMBER({x}),{x}<-0.0005)"], font=Font(color=style.XL_RED, bold=True)))
         elif c.rule == "vr":
-            ws.conditional_formatting.add(rng, FormulaRule(formula=[f"AND(ISNUMBER({x}),{x}<{ro.min_vr / 100})"], font=Font(color=argb("C2410C"), bold=True)))
+            ws.conditional_formatting.add(rng, FormulaRule(formula=[f"AND(ISNUMBER({x}),{x}<{ro.min_vr / 100})"], font=Font(color=style.XL_RED, bold=True)))
 
 
 def _flag_xf(tag: str) -> str:
@@ -1329,7 +1436,7 @@ def build_report(src: Sources, settings: Settings, opt: Options, out_dir: Path,
             part = [r for r in sheet_rows if r.subgroup == sg]
             infos.append(write_report_sheet(ws, f"{title} · {sg}", part, refs, opt, src.sales_period, src, live, settings))
     else:
-        ws = wb.create_sheet(sheet_title("Отчет", used))
+        ws = wb.create_sheet(sheet_title("Товары", used))
         head = title if len(subgroups) > 1 else f"{title} · {subgroups[0]}"
         infos.append(write_report_sheet(ws, head, sheet_rows, refs, opt, src.sales_period, src, live, settings))
 
@@ -1339,10 +1446,10 @@ def build_report(src: Sources, settings: Settings, opt: Options, out_dir: Path,
     from .dashboard import summary as dash_summary
     from .itogi import write_prices_overview, write_summary_sheet
 
-    itogi = wb.create_sheet(sheet_title("Итоги", used))
+    itogi = wb.create_sheet(sheet_title("Сводка", used))
     chart_ws = wb.create_sheet(sheet_title("Графики", used))
-    write_summary_sheet(itogi, kept, infos, opt, src, title, dash_summary(kept, opt), chart_ws)
-    prices_ws = wb.create_sheet(sheet_title("Цены", used))
+    write_summary_sheet(itogi, kept, infos, opt, src, title, dash_summary(kept, opt), chart_ws, getattr(prep, "signals", None))
+    prices_ws = wb.create_sheet(sheet_title("Цены конкурентов", used))
     write_prices_overview(prices_ws, sheet_rows, infos, opt)
 
     order = [itogi] + [wb[i.title] for i in infos] + [prices_ws, crosses, chart_ws] + export_sheets
@@ -1350,8 +1457,7 @@ def build_report(src: Sources, settings: Settings, opt: Options, out_dir: Path,
     report_titles = {i.title for i in infos} | {itogi.title, prices_ws.title}
     for ws in wb.worksheets:
         if ws.title in report_titles:
-            if ws.sheet_properties.tabColor is None:
-                ws.sheet_properties.tabColor = argb("0F4C5C")
+            ws.sheet_properties.tabColor = None  # ярлыки без цвета, как у обычной книги
             ws.sheet_state = "visible"
         else:
             ws.sheet_state = "hidden"
@@ -1535,11 +1641,11 @@ def write_params_sheet(ws, src: Sources, settings: Settings, opt: Options, kept:
         ["Закупочная цена", "цена в валюте с листа «ПСТ» × курс. Курс записан числом в формуле строки"],
         ["СБС план", "закупочная цена × ГЗ. Коэффициент записан числом в формуле строки"],
         ["СБС", "себестоимость с листа «СБС», делённая на количество, прямо в этой ячейке"],
-        ["ВР 1", "1 − СБС / Кат. А; оранжевым — ниже минимальной ВР"],
-        ["Сумма продажи / прибыли", "Продажи, шт × Кат. А и Сумма продажи × ВР 1; итог в строке 1 учитывает фильтр Excel"],
+        ["ВР", "1 − СБС / Кат. А; красным — ниже минимальной ВР"],
+        ["Сумма продажи / прибыли", "Продажи, шт × Кат. А и Сумма продажи × ВР; итог в строке 2 учитывает фильтр Excel"],
         ["Цена конкурента", "минимальная цена на момент формирования, числом. Цены ниже 10 ₽ и цены в разы ниже остальных по этому артикулу не берутся"],
         ["Откл", f"1 − Кат. А / цена конкурента; зелёный — мы {green}, красный — мы {red}"],
-        ["Рек. кат. А (голубая)", "рекомендованная цена — можно править; Изм. %, Рек. МО, ВР рек. и суммы пересчитаются"],
+        ["Новая цена (жёлтая)", "рекомендованная цена — можно править; Изм., новое МО, ВР после и суммы пересчитаются"],
         ["Ценовой сегмент / Автопарк", "по маркам и моделям из «Разновидности» (справочник — в настройках программы)"],
     ]
     plain_block(ws, "Как читать отчёт", ["Обозначение", "Что значит"], legend, start_row=next_row, widths=[36, 80])

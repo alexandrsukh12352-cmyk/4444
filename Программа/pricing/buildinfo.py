@@ -7,8 +7,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-BUILD = "2026-10-17.1"
-BUILD_LABEL = "сборка 17 окт, 1"
+BUILD = "2026-10-17.2"
+BUILD_LABEL = "сборка 17 окт, 2"
 
 
 def column_expectation(brand: str, group: str) -> dict:
@@ -39,7 +39,7 @@ def program_marks() -> list[dict]:
     brief = (_HERE / "brief.py").read_text(encoding="utf-8")
     price_src = (_HERE / "prices.py").read_text(encoding="utf-8")
     page = (_HERE / "web" / "index.html").read_text(encoding="utf-8")
-    price_at = workbook.find('f"{c.name} цена"')
+    price_at = workbook.find('f"{c.name}, ₽"')
     sister_at = workbook.find("sister_title(sister)")
     return [
         {

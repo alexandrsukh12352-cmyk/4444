@@ -424,3 +424,59 @@ def loss_reasons(prep, price_files) -> dict:
                       "supplier": supplier, "why": why, "kind": kind, "sales": r.sales or 0})
     items.sort(key=lambda x: -(x["sales"] or 0))
     return {"since": getattr(prep, "losses_since", ""), "count": len(items), "by_kind": dict(reasons), "items": items[:200]}
+
+
+# ---------------------------------------------------------------- сигналы рынка
+
+MOVE = 0.005  # меньше 0,5% — не движение цены, а округление или другой склад
+SIGNAL_SHARE = 0.2  # двинулась хотя бы пятая часть общих позиций
+SIGNAL_MIN = 3
+
+
+def _ru_date(iso: str) -> str:
+    try:
+        return dt.date.fromisoformat(iso).strftime("%d.%m")
+    except (TypeError, ValueError):
+        return iso or ""
+
+
+def market_signals(rows, prev: dict | None) -> list[dict]:
+    """Кто из конкурентов двинул цены с прошлого прогона группы и насколько.
+
+    Сравниваются только товары, у которых цена этого конкурента есть и тогда, и сейчас.
+    Сигнал — когда вверх или вниз ушла хотя бы пятая часть таких позиций (и не меньше трёх).
+    """
+    if not prev or not prev.get("items"):
+        return []
+    since = _ru_date(prev.get("date", ""))
+    names: dict[str, str] = {}
+    moves: dict[str, list] = {}
+    for r in rows:
+        before = prev["items"].get(str(r.code)) or {}
+        for comp in getattr(r, "competitors", None) or []:
+            names.setdefault(comp.key, comp.name)
+        for comp, price in (getattr(r, "prices", None) or {}).items():
+            old = (before.get(comp) or [None])[0]
+            if not price or not old:
+                continue
+            change = float(price) / float(old) - 1
+            moves.setdefault(comp, []).append(change)
+    out = []
+    for comp, changes in moves.items():
+        n = len(changes)
+        up = [c for c in changes if c > MOVE]
+        down = [c for c in changes if c < -MOVE]
+        name = names.get(comp, comp)
+        for side, part in (("up", up), ("down", down)):
+            if len(part) < SIGNAL_MIN or len(part) / n < SIGNAL_SHARE:
+                continue
+            mid = statistics.median(part)
+            verb = "поднял" if side == "up" else "снизил"
+            pct = f"{mid * 100:+.1f}".replace(".", ",")
+            text = f"{name} {verb} цены на {len(part)} из {n} общих позиций, в среднем на {pct}% с {since}"
+            hint = ("цель по этим товарам выросла — рекомендации это уже учли" if side == "up"
+                    else "цель по этим товарам снизилась — проверьте, не нужно ли нам вниз")
+            out.append({"comp": name, "side": side, "n": len(part), "of": n, "median": mid, "since": since,
+                        "text": text, "hint": hint})
+    out.sort(key=lambda x: -x["n"])
+    return out
