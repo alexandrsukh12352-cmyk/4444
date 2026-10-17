@@ -298,6 +298,11 @@ def write_summary_sheet(ws, rows, infos, opt, src, title: str, summary: dict, da
     if rec:
         lines.append(("Цены: поднять / снизить / не трогать", [(f"={ups}", INT), (f"={downs}", INT), (f"={items}-{ups}-{downs}", INT)]))
     lines.append(("Товаров в отчёте", [(f"={items}", INT)]))
+    from .salestrend import group_trend
+
+    gt = group_trend(src, rows)
+    if gt:
+        lines.append((f"Продажи за 4 нед. до {gt['end']} к 4 нед. до них", [(gt["change"], "+0%;-0%;0%")]))
     for i, (label, values) in enumerate(lines):
         n = 5 + i
         _cell(ws, f"A{n}", label)

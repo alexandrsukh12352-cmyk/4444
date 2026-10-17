@@ -13,7 +13,7 @@ from functools import lru_cache
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .excel import SUPPORTED_EXT, Header, Sheet, cell, clean, code_key, find_header, norm_key, num
+from .excel import LEVEL_SEP, SUPPORTED_EXT, Header, Sheet, cell, clean, code_key, find_header, norm_key, num
 from .bootlog import step as boot_step
 from .filecache import read_sheets_cached as read_sheets
 
@@ -248,6 +248,7 @@ class Sources:
     sales3: dict[str, float] = field(default_factory=dict)
     sales3_qty: dict[str, float] = field(default_factory=dict)
     sales3_period: str = ""
+    sales3_days: dict = field(default_factory=dict)  # код -> [(дата ISO, шт, руб)] — если выгрузка по дням/месяцам
     price_sheets: list[Sheet] = field(default_factory=list)  # прайсы и всё нераспознанное
     sbs: dict[str, tuple[float | None, float | None]] = field(default_factory=dict)  # код -> (остаток, СБС)
     transit: dict[str, float] = field(default_factory=dict)  # нормализованный артикул -> заказано, шт (итого)
@@ -394,6 +395,8 @@ def classify(sheet: Sheet) -> Located | None:
         loc = locate(sheet, columns, required)
         if loc:
             loc.kind = kind
+            if kind == "sales":
+                widen_sales(loc)
             return loc
     if loc := classify_transit(sheet):
         return loc
@@ -567,6 +570,7 @@ def _company_base(folder: Path) -> Sources:
         out.sales_period = src.sales_period
     if "sales3" in found:
         out.sales3, out.sales3_qty, out.sales3_period = src.sales3, src.sales3_qty, src.sales3_period
+        out.sales3_days = getattr(src, "sales3_days", {}) or {}
     return out
 
 
@@ -593,6 +597,7 @@ def apply_company(src: Sources, company: Sources) -> Sources:
             out.sbs = company.sbs
         elif kind == "sales3":
             out.sales3, out.sales3_qty, out.sales3_period = company.sales3, company.sales3_qty, company.sales3_period
+            out.sales3_days = getattr(company, "sales3_days", {}) or {}
         else:
             out.sales = company.sales
             out.sales_qty = company.sales_qty
@@ -863,18 +868,101 @@ def _key(loc: Located, row: list) -> str:
     return f"art:{art}" if art else ""
 
 
+_MONTHS = ("январ", "феврал", "март", "апрел", "ма", "июн", "июл", "август", "сентябр", "октябр", "ноябр", "декабр")
+_DAY_HEAD = re.compile(r"^(\d{1,2})\.(\d{1,2})\.(\d{4})")
+_MONTH_HEAD = re.compile(r"^([а-яё]+)\s+(\d{4})", re.IGNORECASE)
+_WEEK_HEAD = re.compile(r"(\d{1,2})\.(\d{1,2})\.(\d{4})\s*[-–—]\s*(\d{1,2})\.(\d{1,2})\.(\d{4})")
+
+
+def _period_of(label: str):
+    """Начало и конец периода из шапки столбца: «01.08.2026 0:00:00», «Август 2026», «04.08.2026 - 10.08.2026»."""
+    import calendar
+    import datetime as _dt
+
+    text = clean(label)
+    try:
+        if m := _WEEK_HEAD.search(text):
+            a = _dt.date(int(m.group(3)), int(m.group(2)), int(m.group(1)))
+            b = _dt.date(int(m.group(6)), int(m.group(5)), int(m.group(4)))
+            return a, b
+        if m := _DAY_HEAD.match(text):
+            d = _dt.date(int(m.group(3)), int(m.group(2)), int(m.group(1)))
+            return d, d
+        if m := _MONTH_HEAD.match(text):
+            word = m.group(1).lower().replace("ё", "е")
+            month = next((i for i, w in enumerate(_MONTHS, 1) if word.startswith(w)), None)
+            if month:
+                year = int(m.group(2))
+                return _dt.date(year, month, 1), _dt.date(year, month, calendar.monthrange(year, month)[1])
+    except ValueError:
+        return None
+    return None
+
+
+def widen_sales(loc: Located) -> None:
+    """Продажи по дням, неделям или месяцам: шапка в два этажа «период / количество, сумма».
+
+    Без этого берётся первый период — продажи за один день. Итог берётся из столбцов «Итого»,
+    а если их нет — суммой всех периодов. Периоды запоминаются для динамики продаж.
+    """
+    periods: dict[str, dict] = {}
+    total: dict[str, int] = {}
+    for i, text in enumerate(loc.header.raw):
+        if LEVEL_SEP not in text:
+            continue
+        top, low = text.split(LEVEL_SEP, 1)
+        low_key = norm_key(low)
+        field_name = "qty" if re.search(r"количество|кол-во", low_key) else ("amount" if "сумма продажи" in low_key else "")
+        if not field_name:
+            continue
+        if norm_key(top).startswith("итого"):
+            total[field_name] = i
+        elif (span := _period_of(top)) is not None:
+            periods.setdefault(top.strip(), {"span": span})[field_name] = i
+    if len(periods) < 2:
+        return
+    loc.periods = list(periods.values())
+    loc.period_total = bool(total)
+    for field_name, idx in total.items():
+        loc.cols[field_name] = idx
+
+
 def read_sales(loc: Located) -> tuple[dict[str, float], dict[str, float]]:
     """(код -> сумма, руб; код -> количество, шт). Количества может не быть в старых выгрузках."""
     amount: dict[str, float] = defaultdict(float)
     qty: dict[str, float] = defaultdict(float)
+    periods = getattr(loc, "periods", None) if not getattr(loc, "period_total", True) else None
     for row in loc.header.data:
         key = _key(loc, row)
         if not key or _is_total(row, loc):
+            continue
+        if periods:
+            amount[key] += sum(num(cell(row, p["amount"])) or 0.0 for p in periods if "amount" in p)
+            qty[key] += sum(num(cell(row, p["qty"])) or 0.0 for p in periods if "qty" in p)
             continue
         amount[key] += num(loc.get(row, "amount")) or 0.0
         if "qty" in loc.cols:
             qty[key] += num(loc.get(row, "qty")) or 0.0
     return dict(amount), dict(qty)
+
+
+def read_sales_periods(loc: Located) -> dict[str, list]:
+    """Код -> [(начало ISO, конец ISO, шт, руб)] по непустым периодам. Пусто, если выгрузка без разбивки."""
+    periods = getattr(loc, "periods", None)
+    if not periods:
+        return {}
+    out: dict[str, list] = {}
+    for row in loc.header.data:
+        key = _key(loc, row)
+        if not key or _is_total(row, loc):
+            continue
+        series = out.setdefault(key, [])
+        for p in periods:
+            q = num(cell(row, p["qty"])) if "qty" in p else None
+            a = num(cell(row, p["amount"])) if "amount" in p else None
+            if q or a:
+                series.append((p["span"][0].isoformat(), p["span"][1].isoformat(), q or 0.0, a or 0.0))
+    return {k: v for k, v in out.items() if v}
 
 
 RECENT_WORDS = ("3 мес", "3мес", "три мес", "3-х мес", "3х мес", "квартал", "90 дн")
@@ -1147,6 +1235,7 @@ def load_all(src: Sources) -> None:
     if loc := src.located("sales3"):
         src.sales3, src.sales3_qty = read_sales(loc)
         src.sales3_period = sales_period(loc)
+        src.sales3_days = read_sales_periods(loc)
     if loc := src.located("sbs"):
         src.sbs = read_sbs(loc)
     if loc := src.located("transit"):

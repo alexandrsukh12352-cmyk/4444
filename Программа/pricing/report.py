@@ -139,6 +139,8 @@ class Row:
     in_transit: float | None = None  # заказано, шт — из «Товар в пути», итог по городам
     sales3: float | None = None  # продажи за последние месяцы, руб.; None — такой выгрузки нет
     sales3_qty: float | None = None
+    sales_trend: float | None = None  # продажи за 4 недели к 4 неделям до них; None — нет разбивки по дням или мало продаж
+    change_effect: str = ""  # что стало с продажами после последнего изменения цены
     frozen: str = ""  # цену недавно меняли — рекомендацию не даём (история цен)
     last_change: dict | None = None  # последнее изменение Кат. А: дата, было, стало, чьё
     competitors: list = field(default_factory=list)  # bc.Competitor из позиционирования
@@ -462,6 +464,10 @@ def _build_rows(src: Sources, settings: Settings, opt: Options, positioning) -> 
 
     rows = []
     recent = bool(src.located("sales3"))
+    days = getattr(src, "sales3_days", None) or {}
+    from .salestrend import period_end, trend
+
+    days_end = period_end(getattr(src, "sales3_period", ""))
     for p, a in base:
         it = p or a
         if brand and norm_text(it.brand) != brand or group and norm_text(it.group) != group:
@@ -520,6 +526,8 @@ def _build_rows(src: Sources, settings: Settings, opt: Options, positioning) -> 
         if recent:
             row.sales3 = src.sales3.get(it.code, 0.0)
             row.sales3_qty = src.sales3_qty.get(it.code, 0.0) if src.sales3_qty else None
+            if days:
+                row.sales_trend = trend(days.get(it.code) or [], days_end)[2]
         if not _subgroup_in_positioning(positioning, it.brand, it.group, subgroup):
             continue
         _, _, row.competitors, _ = positioning.resolve(row.brand, row.group, row.subgroup)
@@ -1315,6 +1323,14 @@ def prepare(src: Sources, settings: Settings, opt: Options, price_files: list[Pr
             except Exception:  # noqa: BLE001 — история не должна мешать отчёту
                 pass
         annotate(kept, opt.recs.cooldown)
+        days = getattr(src, "sales3_days", None) or {}
+        if days:
+            from .salestrend import effect_text, period_end
+
+            end = period_end(getattr(src, "sales3_period", ""))
+            for r in kept:
+                if r.last_change:
+                    r.change_effect = effect_text(days.get(r.code) or [], r.last_change, end)
     apply_recommendations(kept, opt)
     kept.sort(key=lambda r: (-(r.sales_qty or 0), -(r.sales or 0), r.article))
     apply_sisters(kept, src)

@@ -808,6 +808,9 @@ def report_columns(rows: list[Row], refs: Refs, opt: Options, period: str,
         qty3 = any(r.sales3_qty for r in rows)
         sales.append(Column("Продажи 3 мес, шт" if qty3 else "Продажи 3 мес, ₽", "calc", 10,
                             (lambda r, *_: r.sales3_qty) if qty3 else (lambda r, *_: r.sales3), INT, key="sales3"))
+    if any(getattr(r, "sales_trend", None) is not None for r in rows):
+        # последние 4 недели к 4 неделям до них — по выгрузке продаж с разбивкой по дням или месяцам
+        sales.append(Column("Динамика 4 нед.", "calc", 9, lambda r, *_: getattr(r, "sales_trend", None), CHANGE, key="trend", rule="trend"))
     sales += [
         Column("Продажи, ₽", "calc", 13, sales_rub_value, RUB, key="sales", input=is_input),
         Column("Остаток, шт", "calc", 9, stock_value, INT, key="stock", input=is_input),
@@ -883,7 +886,8 @@ def report_columns(rows: list[Row], refs: Refs, opt: Options, period: str,
         if any(getattr(r, "last_change", None) for r in rows):
             from .pricehistory import change_text
 
-            extra.append(Column("Цену меняли", "info", 26, lambda r, *_: change_text(getattr(r, "last_change", None)), key="changed"))
+            extra.append(Column("Цену меняли", "info", 26, lambda r, *_: "; ".join(
+                x for x in (change_text(getattr(r, "last_change", None)), getattr(r, "change_effect", "")) if x), key="changed"))
         extra.append(Column("Новое МО, ₽", "rec", 11, lambda r, n, L: f'=IF(ISNUMBER({L["rec"]}{n}),{L["rec"]}{n}/(1-{excel_num(r.discount)}/100),"")'
                             if r.discount is not None else None, RUB, key="rec_mo"))
         extra.append(Column("ВР после", "rec", 7, margin("rec"), PCT, key="vr_rec", rule="vr"))
@@ -1087,6 +1091,9 @@ def add_rules(ws, cols: list[Column], L: dict, last: int, opt: Options) -> None:
             ws.conditional_formatting.add(rng, FormulaRule(formula=[f"AND(ISNUMBER({x}),{x}<-0.0005)"], font=Font(color=style.XL_RED, bold=True)))
         elif c.rule == "vr":
             ws.conditional_formatting.add(rng, FormulaRule(formula=[f"AND(ISNUMBER({x}),{x}<{ro.min_vr / 100})"], font=Font(color=style.XL_RED, bold=True)))
+        elif c.rule == "trend":
+            ws.conditional_formatting.add(rng, FormulaRule(formula=[f"AND(ISNUMBER({x}),{x}>=0.2)"], font=Font(color=style.XL_GREEN)))
+            ws.conditional_formatting.add(rng, FormulaRule(formula=[f"AND(ISNUMBER({x}),{x}<=-0.2)"], font=Font(color=style.XL_RED)))
 
 
 def _flag_xf(tag: str) -> str:

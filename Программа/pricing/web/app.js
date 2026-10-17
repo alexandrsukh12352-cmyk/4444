@@ -2346,6 +2346,10 @@ function attention(d) {
   if (dn && dn.items && dn.need_lift != null && dn.need_lift > 0.15) {
     out.push({ kind: "dn", text: `Снижения (${fmtInt(dn.items)} тов.) окупятся только при росте их продаж на ${fmtPct(dn.need_lift)}.` });
   }
+  const st = S.analysis && S.analysis.sales_trend;
+  if (st && Math.abs(st.change) >= 0.1) {
+    out.push({ kind: st.change > 0 ? "up" : "dn", text: `Продажи группы за 4 недели до ${st.end} ${st.change > 0 ? "выросли" : "упали"} на ${fmtPct(Math.abs(st.change))} к 4 неделям до них. Растут ${fmtInt(st.up)} ${plural(st.up, "товар", "товара", "товаров")}, падают ${fmtInt(st.down)} — столбец «Динамика 4 нед.» в отчёте.` });
+  }
   for (const sg of ((S.analysis && S.analysis.signals) || []).slice(0, 2)) {
     out.push({ kind: sg.side === "up" ? "up" : "dn", text: `${sg.text}: ${sg.hint}.` });
   }

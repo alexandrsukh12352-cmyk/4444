@@ -137,3 +137,40 @@ def test_currency_move_is_a_signal(monkeypatch):
     rows = [NS(purchase_currency="JPY"), NS(purchase_currency="JPY"), NS(purchase_currency="RUB")]
     sig = server.currency_signals(Path("."), rows)
     assert [s["comp"] for s in sig] == ["JPY"] and sig[0]["n"] == 2 and "+5,0%" in sig[0]["text"]
+
+
+def test_sales_by_days_take_the_total_and_keep_the_series():
+    from pricing.excel import Sheet
+    from pricing.sources import classify, read_sales, read_sales_periods
+
+    top = ["Товар", "Артикул", "Код", "01.08.2026 0:00:00", "01.08.2026 0:00:00", "02.08.2026 0:00:00", "02.08.2026 0:00:00", "Итого", "Итого"]
+    low = ["Товар", "Артикул", "Код"] + ["00. Количество (шт)", "01. Сумма продажи, руб (отгрузка - возврат)"] * 3
+    grid = [["Анализ себестоимости продаж"], ["Начало периода: 01.08.2026"], ["Конец периода: 02.08.2026"], top, low,
+            ["Диск", "A1", 101, 2, 200, None, None, 2, 200], ["Диск", "A2", 102, None, None, 3, 330, 3, 330]]
+    loc = classify(Sheet(Path("Продажи за 3 месяца.xlsx"), "TDSheet", grid))
+    amount, qty = read_sales(loc)
+    assert qty == {"101": 2.0, "102": 3.0} and amount["102"] == 330.0  # итог, а не первый день
+    assert read_sales_periods(loc)["102"] == [("2026-08-02", "2026-08-02", 3.0, 330.0)]
+    # по месяцам и без «Итого»: сумма месяцев
+    top = ["Товар", "Код", "Август 2026", "Август 2026", "Сентябрь 2026", "Сентябрь 2026"]
+    low = ["Товар", "Код"] + ["Количество", "Сумма продажи"] * 2
+    grid = [top, low, ["Диск", 101, 4, 400, 6, 600]]
+    loc = classify(Sheet(Path("Продажи.xlsx"), "Лист1", grid))
+    amount, qty = read_sales(loc)
+    assert qty == {"101": 10.0} and amount == {"101": 1000.0}
+    assert read_sales_periods(loc)["101"][1][:2] == ("2026-09-01", "2026-09-30")
+
+
+def test_sales_trend_and_effect_of_a_price_change():
+    from pricing import salestrend as T
+
+    end = dt.date(2026, 10, 16)
+    days = [((end - dt.timedelta(days=i)).isoformat(),) * 2 + (1.0 if i < 28 else 2.0, 100.0) for i in range(56)]
+    recent, before, change = T.trend(days, end)
+    assert recent == 28 and before == 56 and round(change, 2) == -0.5
+    assert T.trend(days[:5], end)[2] is None  # базы нет
+    text = T.effect_text(days, {"date": (end - dt.timedelta(days=27)).isoformat()}, end)
+    assert "-50%" in text and "28 дн." in text
+    assert T.effect_text(days, {"date": (end - dt.timedelta(days=5)).isoformat()}, end) == ""  # прошло мало дней
+    month = [("2026-09-01", "2026-09-30", 30.0, 0.0)]
+    assert round(T._amount(month, dt.date(2026, 9, 21), dt.date(2026, 9, 30)), 6) == 10.0

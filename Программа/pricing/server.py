@@ -1317,7 +1317,17 @@ def api_analyze(body: dict) -> dict:
         "losses": insight.loss_reasons(prep, files),
         "signals": list(prep.signals) + currency_signals(folder, final),
         "oem": insight.oem_summary(final, src, opt),
+        "sales_trend": _group_trend(src, final),
     }
+
+
+def _group_trend(src, rows):
+    try:
+        from .salestrend import group_trend
+
+        return group_trend(src, rows)
+    except Exception:  # noqa: BLE001
+        return None
 
 
 RATE_MOVE = 0.03  # курс сдвинулся на 3% и больше — сигнал
