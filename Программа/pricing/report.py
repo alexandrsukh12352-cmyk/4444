@@ -140,6 +140,7 @@ class Row:
     sales3: float | None = None  # продажи за последние месяцы, руб.; None — такой выгрузки нет
     sales3_qty: float | None = None
     sales_trend: float | None = None  # продажи за 4 недели к 4 неделям до них; None — нет разбивки по дням или мало продаж
+    weekly: float | None = None  # продаж в неделю по выгрузке за последние месяцы (шт, а без штук — руб.)
     change_effect: str = ""  # что стало с продажами после последнего изменения цены
     frozen: str = ""  # цену недавно меняли — рекомендацию не даём (история цен)
     last_change: dict | None = None  # последнее изменение Кат. А: дата, было, стало, чьё
@@ -199,6 +200,7 @@ class Options:
     stock_slice: str = ""  # sale / overstock — отдельный отчёт только по этой выборке
     sheet_filters: list | None = None  # None — три фильтра по умолчанию; список — что вывести над таблицей
     reason_cols: str = "all"  # all — «Причина» и «Подробно»; short — только «Причина»; none — без них
+    demand: bool = True  # рекомендации учитывают продажи: динамику 4 недель и запас в неделях
     oem_cross: str = "show"  # кроссы через ОЕМ: off — не искать, show — показывать, use — брать в цену
 
     @classmethod
@@ -468,6 +470,9 @@ def _build_rows(src: Sources, settings: Settings, opt: Options, positioning) -> 
     from .salestrend import period_end, trend
 
     days_end = period_end(getattr(src, "sales3_period", ""))
+    from .salestrend import period_days
+
+    span = period_days(getattr(src, "sales3_period", ""))
     for p, a in base:
         it = p or a
         if brand and norm_text(it.brand) != brand or group and norm_text(it.group) != group:
@@ -527,7 +532,11 @@ def _build_rows(src: Sources, settings: Settings, opt: Options, positioning) -> 
             row.sales3 = src.sales3.get(it.code, 0.0)
             row.sales3_qty = src.sales3_qty.get(it.code, 0.0) if src.sales3_qty else None
             if days:
-                row.sales_trend = trend(days.get(it.code) or [], days_end)[2]
+                recent28, _before, row.sales_trend = trend(days.get(it.code) or [], days_end)
+                if row.sales3_qty is not None:
+                    row.weekly = recent28 / 4
+            elif row.sales3_qty is not None and span:
+                row.weekly = row.sales3_qty / (span / 7)
         if not _subgroup_in_positioning(positioning, it.brand, it.group, subgroup):
             continue
         _, _, row.competitors, _ = positioning.resolve(row.brand, row.group, row.subgroup)
@@ -1395,7 +1404,11 @@ def competitor_order(rows: list[Row]) -> list:
 def apply_recommendations(rows: list[Row], opt: Options) -> None:
     """Цель по позиционированию на каждый товар; рекомендованная Кат. А — если функция включена."""
     ro = opt.recs
+    ro.demand = bool(getattr(opt, "demand", True))
     weights = weight_classes(rows, ro)
+    from .recommend import cover_limit
+
+    high = cover_limit(cover_weeks(r) for r in rows)
     for r in rows:
         order = [c.key for c in sorted(r.competitors, key=lambda c: c.order) if c.key in r.picks]
         names = {c.key: c.name for c in r.competitors}
@@ -1420,7 +1433,17 @@ def apply_recommendations(rows: list[Row], opt: Options) -> None:
                 sold=sold_recently(r),
                 stock=bool((getattr(r, "stock", None) or 0) > 0 or (getattr(r, "in_transit", None) or 0) > 0),
                 new=is_new(r), frozen=getattr(r, "frozen", "") or "",
+                trend=getattr(r, "sales_trend", None), cover=cover_weeks(r), cover_high=high,
             )
+
+
+def cover_weeks(r) -> float | None:
+    """На сколько недель хватит остатка (с товаром в пути) при продажах последних недель."""
+    weekly = getattr(r, "weekly", None)
+    if not weekly or weekly <= 0:
+        return None
+    stock = (getattr(r, "stock", None) or 0) + (getattr(r, "in_transit", None) or 0)
+    return stock / weekly
 
 
 def sold_recently(r) -> bool:

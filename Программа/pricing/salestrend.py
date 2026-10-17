@@ -25,6 +25,19 @@ def period_end(period: str) -> dt.date | None:
         return None
 
 
+def period_days(period: str) -> int | None:
+    """«01.08.2026–16.10.2026» -> 77."""
+    found = re.findall(r"(\d{2})\.(\d{2})\.(\d{4})", period or "")
+    if len(found) < 2:
+        return None
+    try:
+        a = dt.date(int(found[0][2]), int(found[0][1]), int(found[0][0]))
+        b = dt.date(int(found[-1][2]), int(found[-1][1]), int(found[-1][0]))
+    except ValueError:
+        return None
+    return (b - a).days + 1 if b >= a else None
+
+
 def _amount(series, start: dt.date, end: dt.date, use_qty: bool = True) -> float:
     """Сколько продано с start по end включительно; период частично в окне — пропорционально дням."""
     total = 0.0

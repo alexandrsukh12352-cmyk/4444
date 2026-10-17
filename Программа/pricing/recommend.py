@@ -40,6 +40,7 @@ class RecOptions:
     max_lift: float = 20.0  # снижение окупается, только если продажи вырастут не больше чем на N %; 0 — не проверять
     cooldown: float = 90.0  # после изменения цены в ПСТ не трогаем столько дней; 0 — не ждать
     priced_first: bool = True
+    demand: bool = True  # учитывать продажи: динамику 4 недель и на сколько недель хватит остатка
 
     @classmethod
     def from_dict(cls, data: dict | None) -> "RecOptions":
@@ -232,6 +233,59 @@ def _round(value: float, step: float) -> float:
 
 # Топ продаж вниз почти не двигаем: это объём группы. 0.02 = 2%.
 TOP_DOWN_CAP = 0.02
+# Продажи как довод: динамика 4 недель к 4 неделям до них и запас в неделях продаж.
+TREND_LEVEL = 0.2  # ±20% и больше — «растут» или «падают»
+COVER_HIGH = 26.0  # «лежит» — не меньше полугода и вдвое больше обычного запаса группы (у импорта полгода — норма)
+COVER_TIMES = 2.0
+COVER_LOW = 3.0  # меньше трёх недель — кончается
+
+
+def _pct(value: float) -> str:
+    return f"{value * 100:+.0f}%".replace("-", "−")
+
+
+def cover_limit(covers) -> float:
+    """Сколько недель запаса — уже «лежит»: вдвое больше медианы группы, но не меньше полугода."""
+    values = sorted(c for c in covers if c is not None)
+    if not values:
+        return COVER_HIGH
+    median = values[len(values) // 2]
+    return max(COVER_HIGH, COVER_TIMES * median)
+
+
+def demand_rule(change: float, trend: float | None, cover: float | None, high: float = COVER_HIGH) -> tuple[str, str]:
+    """Что говорят продажи о шаге к цели. (действие, причина).
+
+    block — шаг в эту сторону не делаем; full — вверх без ужатия для топа и середины;
+    relax — вниз без ограничения окупаемостью (продажи и так уходят или товар лежит); "" — как обычно.
+
+                     продажи растут          продажи падают
+    мы дешевле цели  вверх полным шагом      вверх не идём: падают не из-за цены
+    мы дороже цели   вниз не идём: берут     вниз, окупаемость не держит
+    Запас «лежит» (high: вдвое больше обычного для группы, не меньше полугода) — вверх не идём,
+    вниз без окупаемости. Меньше трёх недель — вниз не идём.
+    """
+    rising = trend is not None and trend >= TREND_LEVEL
+    falling = trend is not None and trend <= -TREND_LEVEL
+    weeks = f"{cover:.0f}" if cover is not None else ""
+    if change > 0:
+        if falling:
+            why = "остатка почти нет" if cover is not None and cover < 1 else "дело не в цене"
+            return "block", f"продажи падают ({_pct(trend)} за 4 нед.) — не поднимаем, {why}"
+        if cover is not None and cover >= high:
+            return "block", f"остатка на {weeks} нед. (обычно до {high:.0f}) — не поднимаем"
+        if rising:
+            return "full", f"продажи растут ({_pct(trend)} за 4 нед.) — шаг вверх без ужатия"
+        return "", ""
+    if rising:
+        return "block", f"продажи растут ({_pct(trend)} за 4 нед.) и так — не снижаем"
+    if cover is not None and cover < COVER_LOW:
+        return "block", f"остатка на {weeks} нед. — не снижаем, кончается"
+    if falling:
+        return "relax", f"продажи падают ({_pct(trend)} за 4 нед.)"
+    if cover is not None and cover >= high:
+        return "relax", f"остатка на {weeks} нед."
+    return "", ""
 
 
 def abc_key(abc: str) -> str:
@@ -245,9 +299,11 @@ def is_core_abc(abc: str) -> bool:
 
 def recommend(cur: float | None, sbs: float | None, target: float | None, segment: str, weight: str,
               opt: RecOptions, who: str = "", raise_cap: float | None = None, abc: str = "",
-              sold: bool = True, stock: bool = True, new: bool = False, frozen: str = "") -> Rec:
+              sold: bool = True, stock: bool = True, new: bool = False, frozen: str = "",
+              trend: float | None = None, cover: float | None = None, cover_high: float = COVER_HIGH) -> Rec:
     """sold — были продажи за период; stock — есть остаток; new — новинка (у неё продаж ещё нет);
-    frozen — цену недавно меняли: текст причины, рекомендацию не даём."""
+    frozen — цену недавно меняли: текст причины, рекомендацию не даём;
+    trend — продажи 4 недель к 4 неделям до них (доля); cover — на сколько недель хватит остатка."""
     if not cur:
         return Rec(None, None, "нет Кат. А", "none")
     if frozen:
@@ -286,7 +342,17 @@ def recommend(cur: float | None, sbs: float | None, target: float | None, segmen
             reason = f"в пределах позиционирования ({who})" if who else "в пределах позиционирования"
         else:
             change = target / cur - 1
-            if change < 0 and down <= 0:
+            action, said = demand_rule(change, trend, cover, cover_high) if opt.demand and not idle else ("", "")
+            if action == "full":
+                up = opt.up.get(segment, opt.up.get(UNKNOWN, 5.0)) / 100
+                if raise_cap is not None:
+                    up = min(up, max(raise_cap, 0.0))
+            if action == "block":
+                price, kind = cur, "keep"
+                reason = f"{said} ({who})" if who else said
+                if change > 0:
+                    up = 0.0  # и мин. ВР не тянем вверх: продажи и так уходят
+            elif change < 0 and down <= 0:
                 price, kind = cur, "keep"
                 reason = "топ продаж, категория A — не снижаем"
                 if who:
@@ -294,7 +360,7 @@ def recommend(cur: float | None, sbs: float | None, target: float | None, segmen
             else:
                 limited = max(-down, min(up, change))
                 payback = ""
-                if limited < 0 and opt.max_lift > 0 and sbs and cur and not idle:
+                if limited < 0 and opt.max_lift > 0 and sbs and cur and not idle and action != "relax":
                     # Снижение на p при марже m окупается, если продажи вырастут на p / (m − p).
                     m = 1 - sbs / cur
                     lift = opt.max_lift / 100
@@ -318,6 +384,10 @@ def recommend(cur: float | None, sbs: float | None, target: float | None, segmen
                         reason += f", ограничено {'+' if limited > 0 else '−'}{_num(abs(limited) * 100, 1)}%"
                         if limited > 0:
                             reason += f" ({segment.lower()} сегмент)"
+                    if said:
+                        reason += f"; {said}"
+                    if action == "full":
+                        notes = []  # шаг для топа и середины не ужимали — не пишем про ужатие
     else:
         price, kind, reason = cur, "keep", "нет цены конкурента"
 

@@ -494,3 +494,13 @@ def test_reason_columns_can_be_left_out_and_prices_split_by_subgroup(tmp_path, s
     prices = [n for n in names if n.startswith("Цены ")]
     assert len(prices) == 2 and "Цены конкурентов" not in names, names
     assert R.Options.from_dict({"reason_cols": "что-то"}).reason_cols == "all"
+
+
+def test_short_reasons_for_sales_rules():
+    from pricing.workbook import short_reason
+
+    assert short_reason("продажи падают (−30% за 4 нед.) — не поднимаем, дело не в цене (Brembo)") == "падают −30% — не поднимаем"
+    assert short_reason("продажи растут (+40% за 4 нед.) и так — не снижаем (Brembo)") == "растут +40% — не снижаем"
+    assert short_reason("остатка на 40 нед. — не поднимаем (Brembo)") == "запас 40 нед. — не поднимаем"
+    assert short_reason("остатка на 60 нед. (обычно до 50) — не поднимаем (Brembo)") == "запас 60 нед. — не поднимаем"
+    assert short_reason("к цели Brembo, ограничено −6,0%; продажи падают (−25% за 4 нед.)") == "к Brembo, шаг ограничен, падают −25%"

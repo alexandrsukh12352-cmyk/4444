@@ -171,6 +171,7 @@ async function start() {
     green_when: o.green_when === "below" ? "below" : "above",
     reason_cols: ["all", "short", "none"].includes(o.reason_cols) ? o.reason_cols : "all",
     oem_cross: ["off", "show", "use"].includes(o.oem_cross) ? o.oem_cross : "show",
+    demand: o.demand !== false,
     money_base: o.money_base === "potential" ? "potential" : "sales",
     rec: { ...(S.init.rec || {}), ...(o.rec || {}), up: { ...(S.init.default_up || {}), ...((o.rec || {}).up || {}) } },
     ui: "custom",
@@ -220,7 +221,7 @@ async function start() {
 }
 
 const CUSTOM_KEYS = ["base", "sources", "filters", "abc", "cross_modes", "cross_split", "price_source", "price_pick",
-  "monitoring_only", "in_stock_only", "subgroup_mode", "suggest_threshold", "green_when", "reason_cols", "oem_cross", "defaults_rev"];
+  "monitoring_only", "in_stock_only", "subgroup_mode", "suggest_threshold", "green_when", "reason_cols", "oem_cross", "demand", "defaults_rev"];
 // 2 — цена конкурента по медиане поставщиков и только в наличии (аудит 16 окт).
 const DEFAULTS_REV = 2;
 const REC_NUMS = ["tolerance", "down", "min_vr", "top_factor", "mid_factor", "rounding", "max_lift", "cooldown"];
@@ -2119,6 +2120,11 @@ function renderRecForm() {
   const all = $("#rec-all");
   all.classList.toggle("hidden", group !== "all");
   seg(all, r.target === "min" ? "min" : "avg", (v) => { r.target = v; rememberGroupRec(); analyze(120); });
+  const dm = $("#rec-demand");
+  if (dm) {
+    dm.checked = S.opts.demand !== false;
+    dm.onchange = () => { S.opts.demand = dm.checked; persist(); analyze(120); };
+  }
   const note = targetButtons.find(([k]) => k === group);
   $("#rec-target-note").textContent = note ? note[2] : "";
   seg($("#green-when"), S.opts.green_when, (v) => { S.opts.green_when = v; persist(); if (S.analysis) renderDash(); });

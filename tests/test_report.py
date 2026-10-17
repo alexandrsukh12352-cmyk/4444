@@ -485,3 +485,35 @@ def test_competitor_price_can_be_the_second_or_the_median_supplier():
     assert R.pick_offer(offers, "median").price == 130
     assert R.pick_offer(offers[:2], "median").price == 100
     assert R.Options.from_dict({"price_pick": "чушь"}).price_pick == "median"
+
+
+def test_sales_decide_the_step_with_the_target():
+    from pricing.recommend import RecOptions, recommend
+
+    opt = RecOptions(enabled=True, tolerance=3, down=10, min_vr=0, max_lift=20, top_factor=0.5)
+    # мы дешевле цели на 20%
+    base = recommend(800, 400, 1000, "Средний", "top", opt, "Brembo", abc="AA")
+    assert base.kind == "up" and round(base.change, 3) == 0.025  # топ: половина шага 5%
+    full = recommend(800, 400, 1000, "Средний", "top", opt, "Brembo", abc="AA", trend=0.4)
+    assert full.kind == "up" and round(full.change, 3) == 0.05 and "растут" in full.reason and "×0,5" not in full.reason
+    falling = recommend(800, 400, 1000, "Средний", "tail", opt, "Brembo", trend=-0.3)
+    assert falling.kind == "keep" and "падают" in falling.reason
+    lying = recommend(800, 400, 1000, "Средний", "tail", opt, "Brembo", cover=40)
+    assert lying.kind == "keep" and "40 нед." in lying.reason
+    # у импорта полгода запаса — норма: при медиане 25 недель «лежит» только от 50
+    from pricing.recommend import cover_limit
+
+    assert cover_limit([10, 20, 25, 30, 60]) == 50 and cover_limit([2, 3, 4]) == 26
+    assert recommend(800, 400, 1000, "Средний", "tail", opt, "Brembo", cover=40, cover_high=50).kind == "up"
+    # мы дороже цели на 20%
+    rising = recommend(1200, 600, 1000, "Средний", "tail", opt, "Brembo", trend=0.5)
+    assert rising.kind == "keep" and "не снижаем" in rising.reason
+    ending = recommend(1200, 600, 1000, "Средний", "tail", opt, "Brembo", cover=2)
+    assert ending.kind == "keep" and "кончается" in ending.reason
+    # падают: окупаемость не держит — полный шаг вниз 10%, а без продаж — меньше
+    cut = recommend(1200, 600, 1000, "Средний", "tail", opt, "Brembo", trend=-0.4)
+    usual = recommend(1200, 600, 1000, "Средний", "tail", opt, "Brembo")
+    assert cut.kind == "down" and round(cut.change, 3) == -0.1 and usual.change > cut.change
+    # переключатель выключен — как раньше
+    off = RecOptions(enabled=True, tolerance=3, down=10, min_vr=0, max_lift=20, demand=False)
+    assert recommend(1200, 600, 1000, "Средний", "tail", off, "Brembo", trend=0.5).kind == "down"

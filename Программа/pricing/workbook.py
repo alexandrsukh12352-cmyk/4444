@@ -566,7 +566,14 @@ def short_reason(reason: str) -> str:
     m = re.match(r"цену меняли (\d{2}\.\d{2})\.\d{4}.*не трогаем до (\d{2}\.\d{2})", text)
     if m:
         return f"меняли {m.group(1)}, ждём до {m.group(2)}"
-    if head.startswith("нет продаж и нет остатка"):
+    m_trend = re.match(r"продажи (растут|падают) \(([+−-]\d+%)", head)
+    m_cover = re.match(r"остатка на (\d+) нед\.(?: \([^)]*\))? — (не \w+)", head)
+    if m_trend:
+        verb = "не снижаем" if "не снижаем" in head else ("не поднимаем" if "не поднимаем" in head else "")
+        out = f"{m_trend.group(1)} {m_trend.group(2)}" + (f" — {verb}" if verb else "")
+    elif m_cover:
+        out = f"запас {m_cover.group(1)} нед. — {m_cover.group(2)}"
+    elif head.startswith("нет продаж и нет остатка"):
         out = "нет продаж и остатка"
     elif head.startswith("нет продаж, а мы не дороже"):
         out = "нет продаж, цена не мешает"
@@ -590,6 +597,10 @@ def short_reason(reason: str) -> str:
             out += ", шаг ограничен"
     else:
         out = head
+    if m := re.search(r"; продажи (растут|падают) \(([+−-]\d+%)", tail):
+        out += f", {m.group(1)} {m.group(2)}"
+    elif m := re.search(r"; остатка на (\d+) нед\.", tail):
+        out += f", запас {m.group(1)} нед."
     if "не ниже ВР" in tail:
         out += ", мин. ВР"
     elif "вопрос к закупке" in tail:
@@ -815,6 +826,11 @@ def report_columns(rows: list[Row], refs: Refs, opt: Options, period: str,
         Column("Продажи, ₽", "calc", 13, sales_rub_value, RUB, key="sales", input=is_input),
         Column("Остаток, шт", "calc", 9, stock_value, INT, key="stock", input=is_input),
     ]
+    if any(getattr(r, "weekly", None) for r in rows):
+        from .report import cover_weeks
+
+        sales.append(Column("Запас, нед.", "calc", 8, lambda r, *_: round(cover_weeks(r), 1) if cover_weeks(r) is not None else None,
+                            '0', key="cover"))
     if any(r.in_transit is not None for r in rows):
         sales += [
             Column("В пути, шт", "calc", 9, lambda r, *_: r.in_transit, INT, key="transit", input=is_input),
